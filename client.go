@@ -6,9 +6,9 @@ import (
 	"sync"
 	"time"
 
-	"github.com/go-lynx/lynx/app/log"
+	"github.com/go-lynx/lynx-kafka/conf"
+	"github.com/go-lynx/lynx/log"
 	"github.com/go-lynx/lynx/plugins"
-	"github.com/go-lynx/lynx/plugins/mq/kafka/conf"
 	"github.com/twmb/franz-go/pkg/kgo"
 )
 

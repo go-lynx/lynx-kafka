@@ -3,7 +3,7 @@ package kafka
 import (
 	"testing"
 
-	"github.com/go-lynx/lynx/plugins/mq/kafka/conf"
+	"github.com/go-lynx/lynx-kafka/conf"
 	"github.com/stretchr/testify/assert"
 )
 

@@ -3,7 +3,7 @@ package kafka
 import (
 	"context"
 
-	"github.com/go-lynx/lynx/plugins/mq/kafka/conf"
+	"github.com/go-lynx/lynx-kafka/conf"
 	"github.com/twmb/franz-go/pkg/sasl"
 	"github.com/twmb/franz-go/pkg/sasl/plain"
 	"github.com/twmb/franz-go/pkg/sasl/scram"

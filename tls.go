@@ -6,7 +6,7 @@ import (
 	"fmt"
 	"os"
 
-	"github.com/go-lynx/lynx/plugins/mq/kafka/conf"
+	"github.com/go-lynx/lynx-kafka/conf"
 )
 
 // buildTLSConfig builds tls.Config based on configuration

@@ -3,7 +3,7 @@ package kafka
 import (
 	"time"
 
-	appmetrics "github.com/go-lynx/lynx/app/observability/metrics"
+	appmetrics "github.com/go-lynx/lynx/observability/metrics"
 )
 
 // hcProvider adapts kafka's HealthChecker to platform HealthProvider

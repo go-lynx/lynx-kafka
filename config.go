@@ -3,7 +3,7 @@ package kafka
 import (
 	"fmt"
 
-	"github.com/go-lynx/lynx/plugins/mq/kafka/conf"
+	"github.com/go-lynx/lynx-kafka/conf"
 	"google.golang.org/protobuf/types/known/durationpb"
 )
 
