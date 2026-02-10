@@ -5,7 +5,7 @@ go 1.25
 toolchain go1.25.3
 
 require (
-	github.com/go-lynx/lynx v1.5.2
+	github.com/go-lynx/lynx v1.5.3
 	github.com/stretchr/testify v1.11.1
 	github.com/twmb/franz-go v1.15.3
 	github.com/twmb/franz-go/pkg/kmsg v1.7.0
