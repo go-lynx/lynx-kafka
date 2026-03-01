@@ -2,6 +2,8 @@ package kafka
 
 import (
 	"sync"
+
+	"github.com/go-lynx/lynx/log"
 )
 
 // GoroutinePool is a simple goroutine pool implementation
@@ -25,7 +27,7 @@ func (p *GoroutinePool) Submit(task func()) {
 	p.mu.RLock()
 	closed := p.closed
 	p.mu.RUnlock()
-	
+
 	if closed {
 		// If pool is closed, execute task in current goroutine
 		if task != nil {
@@ -39,6 +41,9 @@ func (p *GoroutinePool) Submit(task func()) {
 	case p.ch <- struct{}{}: // Acquire token
 		go func() {
 			defer func() {
+				if r := recover(); r != nil {
+					log.Errorf("GoroutinePool task panic recovered: %v", r)
+				}
 				<-p.ch // Release token
 				p.wg.Done()
 			}()
@@ -47,10 +52,17 @@ func (p *GoroutinePool) Submit(task func()) {
 			}
 		}()
 	default:
-		// If pool is full, execute task in current goroutine
+		// If pool is full, execute task in current goroutine (with panic recovery)
 		p.wg.Done()
 		if task != nil {
-			task()
+			func() {
+				defer func() {
+					if r := recover(); r != nil {
+						log.Errorf("GoroutinePool task panic recovered: %v", r)
+					}
+				}()
+				task()
+			}()
 		}
 	}
 }

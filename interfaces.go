@@ -60,6 +60,12 @@ type ClientInterface interface {
 
 	// GetMetrics gets monitoring metrics
 	GetMetrics() *Metrics
+
+	// CheckHealth performs health check on all connections
+	CheckHealth() error
+
+	// GetHealthStatus returns aggregated health status
+	GetHealthStatus() *HealthStatus
 }
 
 // MetricsProvider monitoring metrics provider interface

@@ -34,7 +34,9 @@ type Client struct {
 	ctx                 context.Context
 	cancel              context.CancelFunc
 	metrics             *Metrics
-	retryHandler        *RetryHandler
+	retryHandlers       map[string]*RetryHandler   // per-producer retry config
+	defaultRetryHandler *RetryHandler              // fallback when producer has no retry config
+	circuitBreakers     map[string]*CircuitBreaker // per-producer circuit breaker
 }
 
 // Ensure Client implements all interfaces
@@ -54,16 +56,18 @@ func NewKafkaClient() *Client {
 			confPrefix,
 			100,
 		),
-		ctx:             ctx,
-		cancel:          cancel,
-		metrics:         NewMetrics(),
-		retryHandler:    NewRetryHandler(RetryConfig{MaxRetries: 3, BackoffTime: time.Second, MaxBackoff: 30 * time.Second}),
-		producers:       make(map[string]*kgo.Client),
-		batchProcessors: make(map[string]*BatchProcessor),
-		consumers:       make(map[string]*kgo.Client),
-		activeGroups:    make(map[string]*ConsumerGroup),
-		prodConnMgrs:    make(map[string]*ConnectionManager),
-		consConnMgrs:    make(map[string]*ConnectionManager),
+		ctx:                 ctx,
+		cancel:              cancel,
+		metrics:             NewMetrics(),
+		retryHandlers:       make(map[string]*RetryHandler),
+		defaultRetryHandler: NewRetryHandler(DefaultRetryConfig()),
+		circuitBreakers:     make(map[string]*CircuitBreaker),
+		producers:           make(map[string]*kgo.Client),
+		batchProcessors:     make(map[string]*BatchProcessor),
+		consumers:           make(map[string]*kgo.Client),
+		activeGroups:        make(map[string]*ConsumerGroup),
+		prodConnMgrs:        make(map[string]*ConnectionManager),
+		consConnMgrs:        make(map[string]*ConnectionManager),
 	}
 }
 
@@ -92,14 +96,13 @@ func (k *Client) InitializeResources(rt plugins.Runtime) error {
 func (k *Client) StartupTasks() error {
 	// Initialize all enabled producer instances
 	var firstProducerName string
-	for _, p := range k.conf.Producers {
+	for idx, p := range k.conf.Producers {
 		if p == nil || !p.Enabled {
 			continue
 		}
 		name := p.Name
 		if name == "" {
-			// If unnamed, use topic combination or sequence number; here simply use first-available incremental name
-			name = fmt.Sprintf("producer-%p", p)
+			name = fmt.Sprintf("producer-%d", idx)
 		}
 		if _, exists := k.producers[name]; exists {
 			log.Warnf("duplicate producer name: %s, skip", name)
@@ -111,6 +114,10 @@ func (k *Client) StartupTasks() error {
 		}
 		k.mu.Lock()
 		k.producers[name] = client
+		// Create per-producer retry handler from config
+		k.retryHandlers[name] = NewRetryHandler(k.retryConfigFromProducer(p))
+		// Create per-producer circuit breaker (threshold 5 failures, 30s timeout)
+		k.circuitBreakers[name] = NewCircuitBreaker(5, 30*time.Second)
 		// Start producer connection manager
 		if _, ok := k.prodConnMgrs[name]; !ok {
 			cm := NewConnectionManager(client, k.conf.GetBrokers())
@@ -125,7 +132,10 @@ func (k *Client) StartupTasks() error {
 		}
 		// Each producer decides whether to enable async batch processing based on configuration
 		batchSize := int(p.BatchSize)
-		batchTimeout := p.BatchTimeout.AsDuration()
+		batchTimeout := time.Second
+		if p.BatchTimeout != nil {
+			batchTimeout = p.BatchTimeout.AsDuration()
+		}
 		if batchSize > 1 && batchTimeout > 0 {
 			bp := NewBatchProcessor(batchSize, batchTimeout, func(ctx context.Context, recs []*kgo.Record) error {
 				return k.ProduceBatchWith(ctx, name, "", recs)
@@ -149,6 +159,22 @@ func (k *Client) StartupTasks() error {
 // ShutdownTasks shutdown tasks
 func (k *Client) ShutdownTasks() error {
 	k.cancel() // Cancel all contexts
+
+	// Stop active consumer groups first (before closing clients) to avoid goroutine leaks and use-after-close.
+	// Copy refs and release lock before Stop() to avoid deadlock (Stop blocks on pool.Wait).
+	k.mu.Lock()
+	groups := make(map[string]*ConsumerGroup, len(k.activeGroups))
+	for name, cg := range k.activeGroups {
+		groups[name] = cg
+		delete(k.activeGroups, name)
+	}
+	k.mu.Unlock()
+	for name, cg := range groups {
+		if cg != nil {
+			cg.Stop()
+			log.Infof("Kafka consumer group[%s] stopped", name)
+		}
+	}
 
 	k.mu.Lock()
 	defer k.mu.Unlock()
@@ -188,6 +214,8 @@ func (k *Client) ShutdownTasks() error {
 			log.Infof("Kafka producer[%s] closed", name)
 		}
 		delete(k.producers, name)
+		delete(k.retryHandlers, name)
+		delete(k.circuitBreakers, name)
 	}
 	for name, c := range k.consumers {
 		if c != nil {
@@ -203,4 +231,87 @@ func (k *Client) ShutdownTasks() error {
 // GetMetrics gets monitoring metrics
 func (k *Client) GetMetrics() *Metrics {
 	return k.metrics
+}
+
+// retryConfigFromProducer builds RetryConfig from producer config
+func (k *Client) retryConfigFromProducer(p *conf.Producer) RetryConfig {
+	cfg := DefaultRetryConfig()
+	if p == nil {
+		return cfg
+	}
+	if p.MaxRetries > 0 {
+		cfg.MaxRetries = int(p.MaxRetries)
+	}
+	if p.RetryBackoff != nil {
+		if d := p.RetryBackoff.AsDuration(); d > 0 {
+			cfg.BackoffTime = d
+		}
+	}
+	return cfg
+}
+
+// getCircuitBreaker returns circuit breaker for producer
+func (k *Client) getCircuitBreaker(producerName string) *CircuitBreaker {
+	k.mu.RLock()
+	cb := k.circuitBreakers[producerName]
+	k.mu.RUnlock()
+	return cb
+}
+
+// getRetryHandler returns retry handler for producer, or default fallback
+func (k *Client) getRetryHandler(producerName string) *RetryHandler {
+	k.mu.RLock()
+	rh := k.retryHandlers[producerName]
+	k.mu.RUnlock()
+	if rh != nil {
+		return rh
+	}
+	return k.defaultRetryHandler
+}
+
+// HealthStatus represents the aggregated health status of Kafka clients
+type HealthStatus struct {
+	Healthy   bool
+	LastError error
+}
+
+// CheckHealth performs health check on all producers and consumers.
+// Returns nil if all are healthy, otherwise returns the first error encountered.
+func (k *Client) CheckHealth() error {
+	status := k.GetHealthStatus()
+	if status.Healthy {
+		return nil
+	}
+	return status.LastError
+}
+
+// GetHealthStatus returns the aggregated health status of all Kafka connections.
+func (k *Client) GetHealthStatus() *HealthStatus {
+	k.mu.RLock()
+	defer k.mu.RUnlock()
+
+	status := &HealthStatus{Healthy: true}
+	for name, cm := range k.prodConnMgrs {
+		if cm != nil && cm.healthChecker != nil && !cm.healthChecker.IsHealthy() {
+			status.Healthy = false
+			if err := cm.healthChecker.GetLastError(); err != nil {
+				status.LastError = fmt.Errorf("producer[%s]: %w", name, err)
+			} else {
+				status.LastError = fmt.Errorf("producer[%s] unhealthy", name)
+			}
+			return status
+		}
+	}
+	for name, cm := range k.consConnMgrs {
+		if cm != nil && cm.healthChecker != nil && !cm.healthChecker.IsHealthy() {
+			status.Healthy = false
+			if err := cm.healthChecker.GetLastError(); err != nil {
+				status.LastError = fmt.Errorf("consumer[%s]: %w", name, err)
+			} else {
+				status.LastError = fmt.Errorf("consumer[%s] unhealthy", name)
+			}
+			return status
+		}
+	}
+	return status
 }

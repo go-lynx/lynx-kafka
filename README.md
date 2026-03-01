@@ -12,12 +12,11 @@ The Kafka Plugin provides comprehensive Apache Kafka integration for the Lynx fr
 - **Graceful Shutdown**: Proper cleanup and resource management
 
 ### Advanced Features
-- **SASL Authentication**: Support for SASL/PLAIN, SASL/SCRAM, and SASL/GSSAPI
+- **SASL Authentication**: Support for SASL/PLAIN, SASL/SCRAM-SHA-256, and SASL/SCRAM-SHA-512
 - **TLS Encryption**: End-to-end encryption support
 - **Compression**: Support for gzip, snappy, lz4, and zstd compression
-- **Message Routing**: Configurable message routing strategies
-- **Dead Letter Queue**: Built-in dead letter queue support
-- **Schema Registry**: Integration with Confluent Schema Registry
+- **Circuit Breaker**: Per-producer circuit breaker for fault isolation
+- **Message Routing**: Multi-producer/consumer instance support
 
 ### Performance & Monitoring
 - **Prometheus Metrics**: Comprehensive monitoring and alerting
@@ -47,8 +46,8 @@ The plugin follows the Lynx framework's layered architecture:
 ├─────────────────────────────────────────────────────────────┤
 │                    Kafka Client Layer                      │
 │  ┌─────────────┐  ┌─────────────┐  ┌─────────────────────┐ │
-│  │   Kafka     │  │   Schema    │  │   Authentication   │ │
-│  │   Client    │  │   Registry  │  │     System         │ │
+│  │   Kafka     │  │   franz-go  │  │   Authentication   │ │
+│  │   Client    │  │   Client    │  │   (SASL/TLS)        │ │
 │  └─────────────┘  └─────────────┘  └─────────────────────┘ │
 └─────────────────────────────────────────────────────────────┘
 ```
@@ -171,10 +170,10 @@ func main() {
     }
     
     // Subscribe to messages
-    err = client.Subscribe(ctx, []string{"test-topic"}, func(ctx context.Context, msg *kgo.Record) error {
-        log.Printf("Received message: %s", string(msg.Value))
+    err = client.Subscribe(ctx, []string{"test-topic"}, kafka.MessageHandlerFunc(func(ctx context.Context, topic string, partition int32, offset int64, key, value []byte) error {
+        log.Printf("Received message: %s", string(value))
         return nil
-    })
+    }))
     if err != nil {
         log.Fatal(err)
     }
@@ -198,29 +197,26 @@ err = client.ProduceBatch(ctx, "test-topic", records)
 err = client.SubscribeWith(ctx, "batch-consumer", []string{"test-topic"}, messageHandler)
 
 // Get producer/consumer instances
-producer := client.GetProducer("default-producer")
-consumer := client.GetConsumer("default-consumer")
+producer := client.GetProducer()
+consumer := client.GetConsumer()
 ```
 
 ### Message Handlers
 
 ```go
-// Define message handler
-messageHandler := func(ctx context.Context, msg *kgo.Record) error {
-    log.Printf("Received message from topic %s: %s", msg.Topic, string(msg.Value))
-    
-    // Process message
-    err := processMessage(msg)
-    if err != nil {
-        log.Printf("Failed to process message: %v", err)
-        return err
-    }
-    
-    return nil
-}
+// Define message handler (implements MessageHandler interface)
+messageHandler := kafka.MessageHandlerFunc(func(ctx context.Context, topic string, partition int32, offset int64, key, value []byte) error {
+    log.Printf("Received message from topic %s partition %d: %s", topic, partition, string(value))
+    return processMessage(value)
+})
 
 // Subscribe with handler
 err := client.Subscribe(ctx, []string{"test-topic"}, messageHandler)
+
+// Subscribe with custom handler timeout
+err = client.SubscribeWithOptions(ctx, "my-consumer", []string{"test-topic"}, messageHandler, &kafka.ConsumerGroupOptions{
+    HandlerTimeout: 60 * time.Second,
+})
 ```
 
 ## API Reference
@@ -236,20 +232,19 @@ The main client interface providing access to all Kafka functionality.
 - `ProduceBatch(ctx context.Context, topic string, records []*kgo.Record) error` - Send batch messages
 - `Subscribe(ctx context.Context, topics []string, handler MessageHandler) error` - Subscribe to topics
 - `SubscribeWith(ctx context.Context, consumerName string, topics []string, handler MessageHandler) error` - Subscribe with specific consumer
+- `SubscribeWithOptions(ctx context.Context, consumerName string, topics []string, handler MessageHandler, opts *ConsumerGroupOptions) error` - Subscribe with options (e.g. HandlerTimeout, MaxConcurrency)
 
 #### Management Methods
 
-- `GetProducer(name string) *kgo.Client` - Get producer instance
-- `GetConsumer(name string) *kgo.Client` - Get consumer instance
+- `GetProducer() *kgo.Client` - Get default producer instance
+- `GetConsumer() *kgo.Client` - Get consumer instance
 - `IsProducerReady(name string) bool` - Check producer status
 - `IsConsumerReady(name string) bool` - Check consumer status
-- `Close(name string) error` - Close producer/consumer
-
 #### Monitoring Methods
 
 - `GetMetrics() *Metrics` - Get performance metrics
-- `CheckHealth() error` - Perform health check
-- `GetHealthStatus() *HealthStatus` - Get health status
+- `CheckHealth() error` - Perform health check (returns nil if all connections healthy)
+- `GetHealthStatus() *HealthStatus` - Get aggregated health status (Healthy, LastError)
 
 ## Monitoring and Metrics
 
@@ -279,18 +274,19 @@ The plugin exposes comprehensive Prometheus metrics:
 - `lynx_kafka_producer_messages_total` - Total messages sent
 - `lynx_kafka_producer_bytes_total` - Total bytes sent
 - `lynx_kafka_producer_errors_total` - Total producer errors
-- `lynx_kafka_producer_duration_seconds` - Message send duration
+- `lynx_kafka_producer_latency_seconds` - Message send latency
 
 #### Consumer Metrics
 - `lynx_kafka_consumer_messages_total` - Total messages received
 - `lynx_kafka_consumer_bytes_total` - Total bytes received
 - `lynx_kafka_consumer_errors_total` - Total consumer errors
-- `lynx_kafka_consumer_lag` - Consumer lag
+- `lynx_kafka_consumer_latency_seconds` - Consumer processing latency
+- `lynx_kafka_offset_commits_total` - Offset commits
+- `lynx_kafka_offset_commit_errors_total` - Offset commit errors
 
 #### Connection Metrics
-- `lynx_kafka_connections_active` - Active connections
-- `lynx_kafka_connections_total` - Total connections
 - `lynx_kafka_connection_errors_total` - Connection errors
+- `lynx_kafka_reconnections_total` - Reconnection count
 
 ## Performance Tuning
 

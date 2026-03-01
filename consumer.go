@@ -26,21 +26,25 @@ func (f MessageHandlerFunc) Handle(ctx context.Context, topic string, partition 
 	return f(ctx, topic, partition, offset, key, value)
 }
 
+// DefaultHandlerTimeout default timeout for message handler
+const DefaultHandlerTimeout = 30 * time.Second
+
 // ConsumerGroup consumer group
 type ConsumerGroup struct {
-	client        *kgo.Client
-	groupID       string
-	topics        []string
-	handler       MessageHandler
-	pool          *GoroutinePool
-	metrics       *Metrics
-	ctx           context.Context
-	cancel        context.CancelFunc
-	mu            sync.RWMutex
-	isRunning     bool
-	errorChan     chan error
-	rebalanceChan chan RebalanceEvent
-	autoCommit    bool
+	client         *kgo.Client
+	groupID        string
+	topics         []string
+	handler        MessageHandler
+	pool           *GoroutinePool
+	metrics        *Metrics
+	ctx            context.Context
+	cancel         context.CancelFunc
+	mu             sync.RWMutex
+	isRunning      bool
+	errorChan      chan error
+	rebalanceChan  chan RebalanceEvent
+	autoCommit     bool
+	handlerTimeout time.Duration
 	// per-partition serial processing channels, ensuring strict order for the same partition
 	partChans map[string]chan []*kgo.Record
 	partMu    sync.Mutex
@@ -53,6 +57,8 @@ type ConsumerGroup struct {
 type ConsumerGroupOptions struct {
 	// MaxConcurrency concurrency limit. Priority: Options.MaxConcurrency > conf.Consumer.MaxConcurrency > DefaultPoolConfig().Size
 	MaxConcurrency int
+	// HandlerTimeout timeout per message handler call (default 30s)
+	HandlerTimeout time.Duration
 }
 
 // RebalanceEvent represents partition rebalance events
@@ -83,19 +89,24 @@ func (k *Client) NewConsumerGroupWithOptions(client *kgo.Client, c *conf.Consume
 	if c != nil {
 		autoCommit = c.AutoCommit
 	}
+	handlerTimeout := DefaultHandlerTimeout
+	if opts != nil && opts.HandlerTimeout > 0 {
+		handlerTimeout = opts.HandlerTimeout
+	}
 	return &ConsumerGroup{
-		client:        client,
-		groupID:       c.GetGroupId(),
-		topics:        topics,
-		handler:       handler,
-		pool:          NewGoroutinePool(maxConc),
-		metrics:       k.metrics,
-		ctx:           ctx,
-		cancel:        cancel,
-		errorChan:     make(chan error, 100),
-		rebalanceChan: make(chan RebalanceEvent, 16),
-		autoCommit:    autoCommit,
-		partChans:     make(map[string]chan []*kgo.Record),
+		client:         client,
+		groupID:        c.GetGroupId(),
+		topics:         topics,
+		handler:        handler,
+		pool:           NewGoroutinePool(maxConc),
+		metrics:        k.metrics,
+		ctx:            ctx,
+		cancel:         cancel,
+		errorChan:      make(chan error, 100),
+		rebalanceChan:  make(chan RebalanceEvent, 16),
+		autoCommit:     autoCommit,
+		handlerTimeout: handlerTimeout,
+		partChans:      make(map[string]chan []*kgo.Record),
 	}
 }
 
@@ -105,19 +116,27 @@ func (k *Client) initConsumerInstance(name string, cconf *conf.Consumer) (*kgo.C
 		return nil, fmt.Errorf("consumer config is nil for %s", name)
 	}
 
+	dialTimeout := 10 * time.Second
+	if k.conf != nil && k.conf.DialTimeout != nil {
+		dialTimeout = k.conf.DialTimeout.AsDuration()
+	}
 	opts := []kgo.Opt{
 		kgo.SeedBrokers(k.conf.Brokers...),
 		kgo.ConsumerGroup(cconf.GroupId),
 		kgo.ConsumeResetOffset(k.getStartOffset(cconf)),
-		kgo.DialTimeout(k.conf.DialTimeout.AsDuration()),
+		kgo.DialTimeout(dialTimeout),
 	}
 	if cconf.RebalanceTimeout != nil && cconf.RebalanceTimeout.AsDuration() > 0 {
 		opts = append(opts, kgo.RebalanceTimeout(cconf.RebalanceTimeout.AsDuration()))
 	}
 
 	if cconf.AutoCommit {
+		interval := 5 * time.Second
+		if cconf.AutoCommitInterval != nil {
+			interval = cconf.AutoCommitInterval.AsDuration()
+		}
 		opts = append(opts,
-			kgo.AutoCommitInterval(cconf.AutoCommitInterval.AsDuration()),
+			kgo.AutoCommitInterval(interval),
 			kgo.AutoCommitMarks(),
 		)
 	}
@@ -436,9 +455,13 @@ func (cg *ConsumerGroup) partitionKey(topic string, partition int32) string {
 // processRecordsSerial synchronously processes a batch of records for the given partition; stops on first error and only commits the last consecutive success
 func (cg *ConsumerGroup) processRecordsSerial(topic string, partition int32, records []*kgo.Record) {
 	var lastSuccess *kgo.Record
+	timeout := cg.handlerTimeout
+	if timeout <= 0 {
+		timeout = DefaultHandlerTimeout
+	}
 	for _, record := range records {
 		start := time.Now()
-		ctx, cancel := context.WithTimeout(cg.ctx, 30*time.Second)
+		ctx, cancel := context.WithTimeout(cg.ctx, timeout)
 		err := cg.handler.Handle(ctx, topic, partition, record.Offset, record.Key, record.Value)
 		cancel()
 
@@ -524,15 +547,16 @@ func (cg *ConsumerGroup) handleRebalances() {
 // Stop stops the consumer group
 func (cg *ConsumerGroup) Stop() {
 	cg.cancel()
-	cg.pool.Wait()
-	// Close and purge all partition channels to release workers promptly
+	// Close partition channels first so workers stop receiving new batches and can exit
 	cg.partMu.Lock()
 	for key, ch := range cg.partChans {
 		delete(cg.partChans, key)
 		close(ch)
 	}
 	cg.partMu.Unlock()
-	// Wait background goroutines to finish
+	// Wait for in-flight tasks to complete
+	cg.pool.Wait()
+	// Wait for error/rebalance handler goroutines
 	cg.wg.Wait()
 }
 

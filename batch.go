@@ -41,19 +41,18 @@ func (bp *BatchProcessor) AddRecord(ctx context.Context, record *kgo.Record) err
 
 	// If maximum batch size is reached, process immediately
 	if len(bp.records) >= bp.maxBatchSize {
-		return bp.processBatch(ctx)
+		return bp.processBatchLocked(ctx, false)
 	}
 
-	// Set timer to process after maximum wait time
+	// Set timer to process after maximum wait time.
+	// Use context.Background() in timer callback instead of captured ctx,
+	// since the original ctx may be canceled before the timer fires.
 	if bp.timer == nil {
 		bp.timer = time.AfterFunc(bp.maxWaitTime, func() {
 			bp.mu.Lock()
 			defer bp.mu.Unlock()
 			if len(bp.records) > 0 {
-				err := bp.processBatch(ctx)
-				if err != nil {
-					return
-				}
+				_ = bp.processBatchLocked(context.Background(), false)
 			}
 		})
 	}
@@ -61,8 +60,9 @@ func (bp *BatchProcessor) AddRecord(ctx context.Context, record *kgo.Record) err
 	return nil
 }
 
-// processBatch processes batch records
-func (bp *BatchProcessor) processBatch(ctx context.Context) error {
+// processBatchLocked processes batch records. Caller must hold bp.mu.
+// When sync is true, waits for handler to complete before returning (for Flush).
+func (bp *BatchProcessor) processBatchLocked(ctx context.Context, sync bool) error {
 	if len(bp.records) == 0 {
 		return nil
 	}
@@ -78,7 +78,16 @@ func (bp *BatchProcessor) processBatch(ctx context.Context) error {
 	copy(records, bp.records)
 	bp.records = bp.records[:0]
 
-	// Asynchronously process batch records
+	if sync {
+		// Flush: process synchronously so caller can wait for completion
+		if err := bp.handler(ctx, records); err != nil {
+			log.ErrorfCtx(ctx, "Batch processing failed: %v", err)
+			return err
+		}
+		return nil
+	}
+
+	// Async: process in background
 	go func() {
 		if err := bp.handler(ctx, records); err != nil {
 			log.ErrorfCtx(ctx, "Batch processing failed: %v", err)
@@ -88,11 +97,11 @@ func (bp *BatchProcessor) processBatch(ctx context.Context) error {
 	return nil
 }
 
-// Flush forces processing of all pending records
+// Flush forces processing of all pending records and waits for completion.
 func (bp *BatchProcessor) Flush(ctx context.Context) error {
 	bp.mu.Lock()
 	defer bp.mu.Unlock()
-	return bp.processBatch(ctx)
+	return bp.processBatchLocked(ctx, true)
 }
 
 // Close closes the batch processor

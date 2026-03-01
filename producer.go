@@ -18,14 +18,24 @@ func (k *Client) initProducerInstance(name string, p *conf.Producer) (*kgo.Clien
 
 	// Link linger with configuration: if BatchTimeout is configured, use it as linger for better batching
 	linger := 5 * time.Millisecond
-	if d := p.BatchTimeout.AsDuration(); d > 0 {
-		linger = d
+	if p.BatchTimeout != nil {
+		if d := p.BatchTimeout.AsDuration(); d > 0 {
+			linger = d
+		}
 	}
 
+	dialTimeout := 10 * time.Second
+	brokers := []string{}
+	if k.conf != nil {
+		if k.conf.DialTimeout != nil {
+			dialTimeout = k.conf.DialTimeout.AsDuration()
+		}
+		brokers = k.conf.Brokers
+	}
 	opts := []kgo.Opt{
-		kgo.SeedBrokers(k.conf.Brokers...),
+		kgo.SeedBrokers(brokers...),
 		kgo.ProducerLinger(linger),
-		kgo.DialTimeout(k.conf.DialTimeout.AsDuration()),
+		kgo.DialTimeout(dialTimeout),
 	}
 
 	// TLS configuration
@@ -112,9 +122,18 @@ func (k *Client) ProduceWith(ctx context.Context, producerName, topic string, ke
 	}
 
 	start := time.Now()
-	err := k.retryHandler.DoWithRetry(ctx, func() error {
-		return producer.ProduceSync(ctx, record).FirstErr()
-	})
+	var err error
+	if cb := k.getCircuitBreaker(producerName); cb != nil {
+		err = cb.Call(func() error {
+			return k.getRetryHandler(producerName).DoWithRetry(ctx, func() error {
+				return producer.ProduceSync(ctx, record).FirstErr()
+			})
+		})
+	} else {
+		err = k.getRetryHandler(producerName).DoWithRetry(ctx, func() error {
+			return producer.ProduceSync(ctx, record).FirstErr()
+		})
+	}
 
 	if err != nil {
 		k.metrics.IncrementProducerErrors()
@@ -182,9 +201,18 @@ func (k *Client) ProduceBatchWith(ctx context.Context, producerName string, topi
 	}
 
 	start := time.Now()
-	err := k.retryHandler.DoWithRetry(ctx, func() error {
-		return producer.ProduceSync(ctx, nonNil...).FirstErr()
-	})
+	var err error
+	if cb := k.getCircuitBreaker(producerName); cb != nil {
+		err = cb.Call(func() error {
+			return k.getRetryHandler(producerName).DoWithRetry(ctx, func() error {
+				return producer.ProduceSync(ctx, nonNil...).FirstErr()
+			})
+		})
+	} else {
+		err = k.getRetryHandler(producerName).DoWithRetry(ctx, func() error {
+			return producer.ProduceSync(ctx, nonNil...).FirstErr()
+		})
+	}
 
 	if err != nil {
 		k.metrics.IncrementProducerErrors()
