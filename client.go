@@ -16,6 +16,7 @@ import (
 type Client struct {
 	*plugins.BasePlugin
 	conf *conf.Kafka
+	rt   plugins.Runtime
 	// Multi-instance producers/consumers
 	producers       map[string]*kgo.Client
 	batchProcessors map[string]*BatchProcessor
@@ -73,6 +74,10 @@ func NewKafkaClient() *Client {
 
 // InitializeResources initializes Kafka resources
 func (k *Client) InitializeResources(rt plugins.Runtime) error {
+	if err := k.BasePlugin.InitializeResources(rt); err != nil {
+		return err
+	}
+	k.rt = rt
 	k.conf = &conf.Kafka{}
 
 	// Load configuration
@@ -150,6 +155,52 @@ func (k *Client) StartupTasks() error {
 	}
 	if firstProducerName != "" {
 		k.defaultProducer = firstProducerName
+	}
+
+	if k.rt != nil {
+		if err := k.rt.RegisterSharedResource(pluginName, k); err != nil {
+			return fmt.Errorf("failed to register Kafka shared resource: %w", err)
+		}
+		if len(k.producers) > 0 {
+			if err := k.rt.RegisterPrivateResource("producers", k.producers); err != nil {
+				log.Warnf("failed to register Kafka private producers resource: %v", err)
+			}
+		}
+		if len(k.batchProcessors) > 0 {
+			if err := k.rt.RegisterPrivateResource("batch_processors", k.batchProcessors); err != nil {
+				log.Warnf("failed to register Kafka private batch processors resource: %v", err)
+			}
+		}
+		if len(k.prodConnMgrs) > 0 {
+			if err := k.rt.RegisterPrivateResource("producer_connection_managers", k.prodConnMgrs); err != nil {
+				log.Warnf("failed to register Kafka private producer connection managers resource: %v", err)
+			}
+		}
+		if len(k.consConnMgrs) > 0 {
+			if err := k.rt.RegisterPrivateResource("consumer_connection_managers", k.consConnMgrs); err != nil {
+				log.Warnf("failed to register Kafka private consumer connection managers resource: %v", err)
+			}
+		}
+		if len(k.retryHandlers) > 0 {
+			if err := k.rt.RegisterPrivateResource("retry_handlers", k.retryHandlers); err != nil {
+				log.Warnf("failed to register Kafka private retry handlers resource: %v", err)
+			}
+		}
+		if len(k.circuitBreakers) > 0 {
+			if err := k.rt.RegisterPrivateResource("circuit_breakers", k.circuitBreakers); err != nil {
+				log.Warnf("failed to register Kafka private circuit breakers resource: %v", err)
+			}
+		}
+		if k.metrics != nil {
+			if err := k.rt.RegisterPrivateResource("metrics", k.metrics); err != nil {
+				log.Warnf("failed to register Kafka private metrics resource: %v", err)
+			}
+		}
+		if k.defaultRetryHandler != nil {
+			if err := k.rt.RegisterPrivateResource("default_retry_handler", k.defaultRetryHandler); err != nil {
+				log.Warnf("failed to register Kafka private default retry handler resource: %v", err)
+			}
+		}
 	}
 
 	// Consumers are initialized during Subscribe/SubscribeWith
