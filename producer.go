@@ -67,6 +67,11 @@ func (k *Client) initProducerInstance(name string, p *conf.Producer) (*kgo.Clien
 		opts = append(opts, kgo.RequiredAcks(kgo.LeaderAck()))
 	}
 
+	// franz-go 默认开启幂等写入，仅允许 acks=all(-1)；leader/no ack 须关闭幂等
+	if p.RequiredAcks != -1 {
+		opts = append(opts, kgo.DisableIdempotentWrite())
+	}
+
 	producer, err := kgo.NewClient(opts...)
 	if err != nil {
 		return nil, fmt.Errorf("%w: %v", ErrConnectionFailed, err)

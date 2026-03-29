@@ -134,12 +134,11 @@ func (k *Client) validateTLSConfig() error {
 		return nil // TLS not enabled, no validation needed
 	}
 
-	// Validate certificate and key
-	if k.conf.Tls.CertFile == "" {
-		return fmt.Errorf("TLS certificate is required when TLS is enabled")
-	}
-	if k.conf.Tls.KeyFile == "" {
-		return fmt.Errorf("TLS key is required when TLS is enabled")
+	// mTLS：证书与私钥须同时提供；仅加密到服务端时二者均可省略（与 proto 注释一致）
+	certSet := k.conf.Tls.CertFile != ""
+	keySet := k.conf.Tls.KeyFile != ""
+	if certSet != keySet {
+		return fmt.Errorf("TLS cert_file and key_file must both be set for mutual TLS, or both omitted for server-only TLS")
 	}
 
 	return nil

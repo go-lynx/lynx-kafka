@@ -7,8 +7,8 @@ toolchain go1.25.3
 require (
 	github.com/go-lynx/lynx v1.6.0-beta
 	github.com/stretchr/testify v1.11.1
-	github.com/twmb/franz-go v1.15.3
-	github.com/twmb/franz-go/pkg/kmsg v1.7.0
+	github.com/twmb/franz-go v1.20.5
+	github.com/twmb/franz-go/pkg/kmsg v1.12.0
 	google.golang.org/protobuf v1.36.10
 )
 
@@ -25,7 +25,7 @@ require (
 	github.com/go-playground/form/v4 v4.3.0 // indirect
 	github.com/google/uuid v1.6.0 // indirect
 	github.com/gorilla/mux v1.8.1 // indirect
-	github.com/klauspost/compress v1.18.0 // indirect
+	github.com/klauspost/compress v1.18.1 // indirect
 	github.com/mattn/go-colorable v0.1.13 // indirect
 	github.com/mattn/go-isatty v0.0.19 // indirect
 	github.com/munnerz/goautoneg v0.0.0-20191010083416-a7dc8b61c822 // indirect

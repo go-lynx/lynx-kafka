@@ -273,6 +273,7 @@ func (k *Client) SubscribeWithOptions(ctx context.Context, consumerName string, 
 		if err != nil {
 			return err
 		}
+		registerConsumerHealth := false
 		k.mu.Lock()
 		k.consumers[consumerName] = cli
 		consumer = cli
@@ -282,10 +283,13 @@ func (k *Client) SubscribeWithOptions(ctx context.Context, consumerName string, 
 			k.consConnMgrs[consumerName] = cm
 			cm.Start()
 			log.Infof("Kafka consumer[%s] connection manager started", consumerName)
-			// Register health metrics
-			k.registerHealthForConsumer(consumerName)
+			// 持写锁时勿调用 registerHealthForConsumer（内部 RLock 会死锁）
+			registerConsumerHealth = true
 		}
 		k.mu.Unlock()
+		if registerConsumerHealth {
+			k.registerHealthForConsumer(consumerName)
+		}
 	}
 
 	// If there is an active group, stop the old group for this instance first

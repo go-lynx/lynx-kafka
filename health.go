@@ -2,6 +2,7 @@ package kafka
 
 import (
 	"context"
+	"strings"
 	"sync"
 	"time"
 
@@ -90,7 +91,13 @@ func (hc *HealthChecker) check() {
 			// Callback should not block main loop
 			go hc.onUnhealthy(err)
 		}
-		log.WarnfCtx(hc.ctx, "Kafka health check failed (%d/%d): %v", hc.errorCount, hc.maxErrors, err)
+		msg := err.Error()
+		if strings.Contains(msg, "bad certificate") {
+			log.WarnfCtx(hc.ctx, "Kafka health check failed (%d/%d): %v (TLS 对端拒绝客户端证书：Aiven 等需在 lynx.kafka.tls 配置 cert_file + key_file，与控制台 Access certificate/key 或 service.cert/service.key 对应)",
+				hc.errorCount, hc.maxErrors, err)
+		} else {
+			log.WarnfCtx(hc.ctx, "Kafka health check failed (%d/%d): %v", hc.errorCount, hc.maxErrors, err)
+		}
 		return
 	}
 
