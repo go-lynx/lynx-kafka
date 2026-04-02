@@ -592,11 +592,19 @@ func (k *Client) IsConsumerReady() bool {
 	k.mu.RLock()
 	defer k.mu.RUnlock()
 	if k.consumer != nil {
-		return true
+		for _, cm := range k.consConnMgrs {
+			if cm == nil || cm.IsConnected() {
+				return true
+			}
+		}
+		return len(k.consConnMgrs) == 0
 	}
-	for _, c := range k.consumers {
+	for name, c := range k.consumers {
 		if c != nil {
-			return true
+			cm := k.consConnMgrs[name]
+			if cm == nil || cm.IsConnected() {
+				return true
+			}
 		}
 	}
 	return false

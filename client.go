@@ -359,7 +359,19 @@ func (k *Client) GetHealthStatus() *HealthStatus {
 
 	status := &HealthStatus{Healthy: true}
 	for name, cm := range k.prodConnMgrs {
-		if cm != nil && cm.healthChecker != nil && !cm.healthChecker.IsHealthy() {
+		if cm == nil {
+			continue
+		}
+		if !cm.IsConnected() {
+			status.Healthy = false
+			if err := cm.LastError(); err != nil {
+				status.LastError = fmt.Errorf("producer[%s]: %w", name, err)
+			} else {
+				status.LastError = fmt.Errorf("producer[%s] not connected", name)
+			}
+			return status
+		}
+		if cm.healthChecker != nil && !cm.healthChecker.IsHealthy() {
 			status.Healthy = false
 			if err := cm.healthChecker.GetLastError(); err != nil {
 				status.LastError = fmt.Errorf("producer[%s]: %w", name, err)
@@ -370,7 +382,19 @@ func (k *Client) GetHealthStatus() *HealthStatus {
 		}
 	}
 	for name, cm := range k.consConnMgrs {
-		if cm != nil && cm.healthChecker != nil && !cm.healthChecker.IsHealthy() {
+		if cm == nil {
+			continue
+		}
+		if !cm.IsConnected() {
+			status.Healthy = false
+			if err := cm.LastError(); err != nil {
+				status.LastError = fmt.Errorf("consumer[%s]: %w", name, err)
+			} else {
+				status.LastError = fmt.Errorf("consumer[%s] not connected", name)
+			}
+			return status
+		}
+		if cm.healthChecker != nil && !cm.healthChecker.IsHealthy() {
 			status.Healthy = false
 			if err := cm.healthChecker.GetLastError(); err != nil {
 				status.LastError = fmt.Errorf("consumer[%s]: %w", name, err)

@@ -33,7 +33,7 @@ func (rh *RetryHandler) DoWithRetry(ctx context.Context, operation func() error)
 	for attempt := 0; attempt <= rh.config.MaxRetries; attempt++ {
 		select {
 		case <-ctx.Done():
-			return ctx.Err()
+			return wrapRetryContextError(ctx.Err(), lastErr, attempt)
 		default:
 		}
 
@@ -48,7 +48,7 @@ func (rh *RetryHandler) DoWithRetry(ctx context.Context, operation func() error)
 			// Wait before retry
 			select {
 			case <-ctx.Done():
-				return ctx.Err()
+				return wrapRetryContextError(ctx.Err(), lastErr, attempt+1)
 			case <-time.After(backoff):
 			}
 
@@ -61,6 +61,16 @@ func (rh *RetryHandler) DoWithRetry(ctx context.Context, operation func() error)
 	}
 
 	return fmt.Errorf("operation failed after %d retries: %w", rh.config.MaxRetries, lastErr)
+}
+
+func wrapRetryContextError(ctxErr, lastErr error, attempts int) error {
+	if ctxErr == nil {
+		return lastErr
+	}
+	if lastErr == nil {
+		return ctxErr
+	}
+	return fmt.Errorf("%w after %d attempts; last kafka error: %v", ctxErr, attempts, lastErr)
 }
 
 // DefaultRetryConfig default retry configuration

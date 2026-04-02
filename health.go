@@ -2,12 +2,14 @@ package kafka
 
 import (
 	"context"
+	"errors"
 	"strings"
 	"sync"
 	"time"
 
 	"github.com/go-lynx/lynx/log"
 	"github.com/twmb/franz-go/pkg/kgo"
+	"github.com/twmb/franz-go/pkg/kerr"
 	"github.com/twmb/franz-go/pkg/kmsg"
 )
 
@@ -158,6 +160,7 @@ type ConnectionManager struct {
 	healthChecker    *HealthChecker
 	mu               sync.RWMutex
 	isConnected      bool
+	lastErr          error
 	reconnectChan    chan struct{}
 	ctx              context.Context
 	cancel           context.CancelFunc
@@ -167,6 +170,12 @@ type ConnectionManager struct {
 // Initial reconnect backoff
 const initialReconnectBackoff = 2 * time.Second
 const maxReconnectBackoff = 60 * time.Second
+// 单次 Metadata 超时；过长会叠加超过 lynx.plugins.start_timeout（默认 5s）导致插件启动失败。
+const initialConnectivityTimeout = 2 * time.Second
+
+// 首次 Metadata 时 Broker 偶发 ILLEGAL_SASL_STATE（SASL 握手与后续请求交错，见 twmb/franz-go#249），短暂退避重试可恢复。次数与 initialConnectivityTimeout 乘积勿超过常见 start_timeout。
+const bootstrapMaxAttempts = 4
+const bootstrapRetryBackoff = 100 * time.Millisecond
 
 // NewConnectionManager creates a new connection manager
 func NewConnectionManager(client *kgo.Client, brokers []string) *ConnectionManager {
@@ -192,6 +201,9 @@ func NewConnectionManager(client *kgo.Client, brokers []string) *ConnectionManag
 
 // Start starts the connection manager
 func (cm *ConnectionManager) Start() {
+	// 必须先同步完成首次 Metadata，再启动周期性健康检查：Lynx 会在插件 Start 后立即同步
+	// CheckHealth()；若此处仍异步 bootstrap，会出现 isConnected==false 且 lastErr==nil，误报 producer not connected。
+	cm.bootstrapConnectionState()
 	cm.healthChecker.Start()
 	go cm.handleReconnections()
 }
@@ -204,18 +216,13 @@ func (cm *ConnectionManager) Stop() {
 
 // onHealthy callback when connection is restored
 func (cm *ConnectionManager) onHealthy() {
-	cm.mu.Lock()
-	defer cm.mu.Unlock()
-	cm.isConnected = true
-	cm.reconnectBackoff = initialReconnectBackoff // reset for next failure
+	cm.markConnected()
 	log.InfofCtx(cm.ctx, "Kafka connection established")
 }
 
 // onUnhealthy callback when connection fails
 func (cm *ConnectionManager) onUnhealthy(err error) {
-	cm.mu.Lock()
-	defer cm.mu.Unlock()
-	cm.isConnected = false
+	cm.markDisconnected(err)
 	log.ErrorfCtx(cm.ctx, "Kafka connection lost: %v", err)
 
 	// Trigger reconnection
@@ -275,6 +282,13 @@ func (cm *ConnectionManager) IsConnected() bool {
 	return cm.isConnected
 }
 
+// LastError returns the last connection-related error.
+func (cm *ConnectionManager) LastError() error {
+	cm.mu.RLock()
+	defer cm.mu.RUnlock()
+	return cm.lastErr
+}
+
 // GetHealthChecker gets the health checker
 func (cm *ConnectionManager) GetHealthChecker() *HealthChecker {
 	return cm.healthChecker
@@ -286,4 +300,49 @@ func (cm *ConnectionManager) ForceReconnect() {
 	case cm.reconnectChan <- struct{}{}:
 	default:
 	}
+}
+
+func (cm *ConnectionManager) bootstrapConnectionState() {
+	var lastErr error
+	for attempt := 1; attempt <= bootstrapMaxAttempts; attempt++ {
+		ctx, cancel := context.WithTimeout(cm.ctx, initialConnectivityTimeout)
+		var req kmsg.MetadataRequest
+		_, err := req.RequestWith(ctx, cm.client)
+		cancel()
+		if err == nil {
+			cm.markConnected()
+			if attempt > 1 {
+				log.InfofCtx(cm.ctx, "Kafka initial connection established after %d attempts", attempt)
+			} else {
+				log.InfofCtx(cm.ctx, "Kafka initial connection established")
+			}
+			return
+		}
+		lastErr = err
+		retry := attempt < bootstrapMaxAttempts && (errors.Is(err, kerr.IllegalSaslState) || strings.Contains(err.Error(), "ILLEGAL_SASL_STATE"))
+		if retry {
+			log.WarnfCtx(cm.ctx, "Kafka initial connectivity attempt %d/%d: %v (retrying after SASL state race)", attempt, bootstrapMaxAttempts, err)
+			time.Sleep(bootstrapRetryBackoff * time.Duration(attempt))
+			continue
+		}
+		break
+	}
+	cm.markDisconnected(lastErr)
+	log.WarnfCtx(cm.ctx, "Kafka initial connectivity check failed: %v", lastErr)
+	cm.ForceReconnect()
+}
+
+func (cm *ConnectionManager) markConnected() {
+	cm.mu.Lock()
+	defer cm.mu.Unlock()
+	cm.isConnected = true
+	cm.lastErr = nil
+	cm.reconnectBackoff = initialReconnectBackoff
+}
+
+func (cm *ConnectionManager) markDisconnected(err error) {
+	cm.mu.Lock()
+	defer cm.mu.Unlock()
+	cm.isConnected = false
+	cm.lastErr = err
 }

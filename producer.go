@@ -98,6 +98,10 @@ func (k *Client) ProduceWith(ctx context.Context, producerName, topic string, ke
 		return fmt.Errorf("invalid topic %s: %w", topic, err)
 	}
 
+	if err := k.getProducerAvailabilityError(producerName); err != nil {
+		return err
+	}
+
 	// If async batch processor is enabled, prioritize enqueueing, with background unified batch sending and metrics
 	k.mu.RLock()
 	bp := k.batchProcessors[producerName]
@@ -142,7 +146,11 @@ func (k *Client) ProduceWith(ctx context.Context, producerName, topic string, ke
 
 	if err != nil {
 		k.metrics.IncrementProducerErrors()
-		log.ErrorfCtx(ctx, "Failed to produce message to topic %s: %v", topic, err)
+		if connErr := k.getProducerConnectionError(producerName); connErr != nil {
+			log.ErrorfCtx(ctx, "Failed to produce message to topic %s: %v (producer health: %v)", topic, err, connErr)
+		} else {
+			log.ErrorfCtx(ctx, "Failed to produce message to topic %s: %v", topic, err)
+		}
 		return fmt.Errorf("failed to produce message: %w", err)
 	}
 
@@ -293,5 +301,35 @@ func (k *Client) IsProducerReady() bool {
 	if k.defaultProducer == "" {
 		return false
 	}
-	return k.producers[k.defaultProducer] != nil
+	if k.producers[k.defaultProducer] == nil {
+		return false
+	}
+	cm := k.prodConnMgrs[k.defaultProducer]
+	if cm == nil {
+		return true
+	}
+	return cm.IsConnected()
+}
+
+func (k *Client) getProducerAvailabilityError(producerName string) error {
+	k.mu.RLock()
+	producer := k.producers[producerName]
+	k.mu.RUnlock()
+	if producer == nil {
+		return ErrProducerNotInitialized
+	}
+	return k.getProducerConnectionError(producerName)
+}
+
+func (k *Client) getProducerConnectionError(producerName string) error {
+	k.mu.RLock()
+	cm := k.prodConnMgrs[producerName]
+	k.mu.RUnlock()
+	if cm == nil || cm.IsConnected() {
+		return nil
+	}
+	if err := cm.LastError(); err != nil {
+		return fmt.Errorf("%w: producer[%s] unavailable: %v", ErrBrokerUnavailable, producerName, err)
+	}
+	return fmt.Errorf("%w: producer[%s] not connected", ErrBrokerUnavailable, producerName)
 }
