@@ -8,8 +8,8 @@ import (
 	"time"
 
 	"github.com/go-lynx/lynx/log"
-	"github.com/twmb/franz-go/pkg/kgo"
 	"github.com/twmb/franz-go/pkg/kerr"
+	"github.com/twmb/franz-go/pkg/kgo"
 	"github.com/twmb/franz-go/pkg/kmsg"
 )
 
@@ -170,6 +170,7 @@ type ConnectionManager struct {
 // Initial reconnect backoff
 const initialReconnectBackoff = 2 * time.Second
 const maxReconnectBackoff = 60 * time.Second
+
 // 单次 Metadata 超时；过长会叠加超过 lynx.plugins.start_timeout（默认 5s）导致插件启动失败。
 const initialConnectivityTimeout = 2 * time.Second
 
@@ -203,9 +204,24 @@ func NewConnectionManager(client *kgo.Client, brokers []string) *ConnectionManag
 func (cm *ConnectionManager) Start() {
 	// 必须先同步完成首次 Metadata，再启动周期性健康检查：Lynx 会在插件 Start 后立即同步
 	// CheckHealth()；若此处仍异步 bootstrap，会出现 isConnected==false 且 lastErr==nil，误报 producer not connected。
-	cm.bootstrapConnectionState()
+	_ = cm.bootstrapConnectionStateWithContext(cm.ctx, true)
 	cm.healthChecker.Start()
 	go cm.handleReconnections()
+}
+
+// StartWithContext starts the connection manager and uses the caller context for
+// the initial connectivity probe so plugin startup can fail fast on cancellation.
+func (cm *ConnectionManager) StartWithContext(ctx context.Context) error {
+	if err := ctx.Err(); err != nil {
+		cm.markDisconnected(err)
+		return err
+	}
+	if err := cm.bootstrapConnectionStateWithContext(ctx, false); err != nil {
+		return err
+	}
+	cm.healthChecker.Start()
+	go cm.handleReconnections()
+	return nil
 }
 
 // Stop stops the connection manager
@@ -303,33 +319,51 @@ func (cm *ConnectionManager) ForceReconnect() {
 }
 
 func (cm *ConnectionManager) bootstrapConnectionState() {
+	_ = cm.bootstrapConnectionStateWithContext(cm.ctx, true)
+}
+
+func (cm *ConnectionManager) bootstrapConnectionStateWithContext(ctx context.Context, scheduleReconnect bool) error {
 	var lastErr error
 	for attempt := 1; attempt <= bootstrapMaxAttempts; attempt++ {
-		ctx, cancel := context.WithTimeout(cm.ctx, initialConnectivityTimeout)
+		if err := ctx.Err(); err != nil {
+			cm.markDisconnected(err)
+			return err
+		}
+		attemptCtx, cancel := context.WithTimeout(ctx, initialConnectivityTimeout)
 		var req kmsg.MetadataRequest
-		_, err := req.RequestWith(ctx, cm.client)
+		_, err := req.RequestWith(attemptCtx, cm.client)
 		cancel()
 		if err == nil {
 			cm.markConnected()
 			if attempt > 1 {
-				log.InfofCtx(cm.ctx, "Kafka initial connection established after %d attempts", attempt)
+				log.InfofCtx(ctx, "Kafka initial connection established after %d attempts", attempt)
 			} else {
-				log.InfofCtx(cm.ctx, "Kafka initial connection established")
+				log.InfofCtx(ctx, "Kafka initial connection established")
 			}
-			return
+			return nil
 		}
 		lastErr = err
 		retry := attempt < bootstrapMaxAttempts && (errors.Is(err, kerr.IllegalSaslState) || strings.Contains(err.Error(), "ILLEGAL_SASL_STATE"))
 		if retry {
-			log.WarnfCtx(cm.ctx, "Kafka initial connectivity attempt %d/%d: %v (retrying after SASL state race)", attempt, bootstrapMaxAttempts, err)
-			time.Sleep(bootstrapRetryBackoff * time.Duration(attempt))
+			log.WarnfCtx(ctx, "Kafka initial connectivity attempt %d/%d: %v (retrying after SASL state race)", attempt, bootstrapMaxAttempts, err)
+			timer := time.NewTimer(bootstrapRetryBackoff * time.Duration(attempt))
+			select {
+			case <-timer.C:
+			case <-ctx.Done():
+				timer.Stop()
+				cm.markDisconnected(ctx.Err())
+				return ctx.Err()
+			}
 			continue
 		}
 		break
 	}
 	cm.markDisconnected(lastErr)
-	log.WarnfCtx(cm.ctx, "Kafka initial connectivity check failed: %v", lastErr)
-	cm.ForceReconnect()
+	log.WarnfCtx(ctx, "Kafka initial connectivity check failed: %v", lastErr)
+	if scheduleReconnect {
+		cm.ForceReconnect()
+	}
+	return lastErr
 }
 
 func (cm *ConnectionManager) markConnected() {

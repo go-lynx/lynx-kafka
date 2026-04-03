@@ -71,7 +71,7 @@ type ClientInterface interface {
 // MetricsProvider monitoring metrics provider interface
 type MetricsProvider interface {
 	// GetStats gets statistics
-	GetStats() map[string]interface{}
+	GetStats() map[string]any
 
 	// Reset resets metrics
 	Reset()

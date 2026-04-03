@@ -2,6 +2,14 @@
 
 The Kafka Plugin provides comprehensive Apache Kafka integration for the Lynx framework, supporting high-performance message production and consumption with advanced features like batch processing, retry mechanisms, and monitoring.
 
+## Version & Migration Notes
+
+- Module path: `github.com/go-lynx/lynx-kafka`
+- Plugin name: `kafka.client`
+- Local release audit note: the current [`go.mod`](./go.mod) still requires `github.com/go-lynx/lynx v1.6.0-beta`; this README reflects the landed API shape, not a completed stable-version sweep across every module.
+- Multi-instance producer/consumer routing is already the primary API surface. `Produce()` targets the default producer, while `ProduceWith()` / `ProduceBatchWith()` target named producer instances configured under `lynx.kafka.producers`.
+- Startup now fails fast when the initial broker connectivity check cannot establish a usable connection, so callers should handle `StartupTasks()` errors as real readiness failures instead of assuming deferred background recovery.
+
 ## Features
 
 ### Core Messaging Support
@@ -54,7 +62,73 @@ The plugin follows the Lynx framework's layered architecture:
 
 ## Configuration
 
-### Basic Configuration
+### Configuration Fields Reference
+
+All Kafka plugin configuration is delivered through protobuf (`conf/kafka.proto`). The following table lists all available fields:
+
+#### Top-Level Fields (`lynx.kafka`)
+
+| Field | Type | Default | Description |
+|-------|------|---------|-------------|
+| `brokers` | `repeated string` | — (required) | Kafka cluster broker address list. Example: `["localhost:9092"]` |
+| `producers` | `repeated Producer` | `[]` | Multiple producer instance configurations. |
+| `consumers` | `repeated Consumer` | `[]` | Multiple consumer instance configurations. |
+| `sasl` | `SASL` | `nil` | SASL authentication configuration. |
+| `tls` | `TLS` | `nil` | TLS encryption configuration. |
+| `dial_timeout` | `duration` | `10s` | Connection timeout when dialing brokers. Example: `{ seconds: 10 }` |
+
+#### Producer Configuration
+
+| Field | Type | Default | Description |
+|-------|------|---------|-------------|
+| `enabled` | `bool` | `false` | Whether to enable this producer instance. |
+| `name` | `string` | `""` | Instance name for differentiation and routing. |
+| `required_acks` | `int32` | `1` | Acknowledgment level: `-1`=all ISR, `1`=leader only, `0`=no ack. |
+| `max_retries` | `int32` | `0` | Maximum number of retry attempts. |
+| `retry_backoff` | `duration` | `100ms` | Wait time between retries. Example: `{ nanos: 100000000 }` |
+| `batch_size` | `int32` | `0` | Batch send size. |
+| `batch_timeout` | `duration` | `1s` | Batch send waiting time. Example: `{ seconds: 1 }` |
+| `compression` | `string` | `"snappy"` | Compression: `none`, `gzip`, `snappy`, `lz4`, `zstd`. |
+| `topics` | `repeated string` | `[]` | Optional allow-list of topics for routing/permissions. |
+
+#### Consumer Configuration
+
+| Field | Type | Default | Description |
+|-------|------|---------|-------------|
+| `enabled` | `bool` | `false` | Whether to enable this consumer instance. |
+| `name` | `string` | `""` | Instance name for differentiation and routing. |
+| `group_id` | `string` | — (required) | Consumer group ID. |
+| `topics` | `repeated string` | — (required) | Subscribed topic list. |
+| `auto_commit` | `bool` | `true` | Whether to enable auto offset commit. |
+| `auto_commit_interval` | `duration` | `5s` | Auto commit interval. Example: `{ seconds: 5 }` |
+| `start_offset` | `string` | `"latest"` | Consumption start position: `latest` or `earliest`. |
+| `max_concurrency` | `int32` | `1` | Maximum processing concurrency. |
+| `min_batch_size` | `int32` | `0` | Minimum records per fetch batch. |
+| `max_batch_size` | `int32` | `0` | Maximum records per fetch batch. |
+| `max_wait_time` | `duration` | `5s` | Maximum waiting time for fetch requests. Example: `{ seconds: 5 }` |
+| `rebalance_timeout` | `duration` | `60s` | Rebalance timeout duration. Example: `{ seconds: 60 }` |
+
+#### SASL Configuration
+
+| Field | Type | Default | Description |
+|-------|------|---------|-------------|
+| `enabled` | `bool` | `false` | Whether to enable SASL authentication. |
+| `mechanism` | `string` | `"PLAIN"` | Auth mechanism: `PLAIN`, `SCRAM-SHA-256`, `SCRAM-SHA-512`. |
+| `username` | `string` | `""` | SASL username. |
+| `password` | `string` | `""` | SASL password. |
+
+#### TLS Configuration
+
+| Field | Type | Default | Description |
+|-------|------|---------|-------------|
+| `enabled` | `bool` | `false` | Whether to enable TLS encryption. |
+| `ca_file` | `string` | `""` | Root CA certificate file path. |
+| `cert_file` | `string` | `""` | Client certificate file path (optional, for mutual TLS). |
+| `key_file` | `string` | `""` | Client private key file path (optional, for mutual TLS). |
+| `insecure_skip_verify` | `bool` | `false` | Skip server cert verification (test env only). |
+| `server_name` | `string` | `""` | SNI / certificate verification domain override. |
+
+### Basic Configuration Example
 
 ```yaml
 lynx:
@@ -62,28 +136,27 @@ lynx:
     brokers:
       - "localhost:9092"
       - "localhost:9093"
-    client_id: "lynx-kafka-client"
-    group_id: "lynx-consumer-group"
-    
+
     producers:
       - name: "default-producer"
         enabled: true
-        topic: "default-topic"
+        topics: ["default-topic"]
         max_retries: 3
-        retry_backoff: "100ms"
+        retry_backoff: { seconds: 0, nanos: 100000000 }  # 100ms
         batch_size: 16384
-        batch_timeout: "10ms"
+        batch_timeout: { seconds: 0, nanos: 10000000 }   # 10ms
         compression: "gzip"
-    
+
     consumers:
       - name: "default-consumer"
         enabled: true
         topics:
           - "default-topic"
         group_id: "lynx-consumer-group"
-        auto_offset_reset: "earliest"
-        enable_auto_commit: true
-        max_poll_records: 500
+        start_offset: "earliest"
+        auto_commit: true
+        auto_commit_interval: { seconds: 5 }
+        max_concurrency: 10
 ```
 
 ### Advanced Configuration
@@ -95,56 +168,49 @@ lynx:
       - "kafka1:9092"
       - "kafka2:9092"
       - "kafka3:9092"
-    
-    # Security configuration
-    security:
-      sasl:
-        enabled: true
-        mechanism: "PLAIN"
-        username: "kafka-user"
-        password: "kafka-password"
-      tls:
-        enabled: true
-        ca_file: "/path/to/ca-cert.pem"
-        cert_file: "/path/to/client-cert.pem"
-        key_file: "/path/to/client-key.pem"
-        insecure_skip_verify: false
-    
-    # Connection configuration
-    connection:
-      timeout: 30s
-      keep_alive: 30s
-      max_connections: 100
-    
-    # Producer configuration
+
+    # Global dial timeout
+    dial_timeout: { seconds: 10 }
+
+    # SASL authentication (top-level, applies to all producers/consumers)
+    sasl:
+      enabled: true
+      mechanism: "PLAIN"
+      username: "kafka-user"
+      password: "kafka-password"
+
+    # TLS encryption (top-level)
+    tls:
+      enabled: true
+      ca_file: "/path/to/ca-cert.pem"
+      cert_file: "/path/to/client-cert.pem"
+      key_file: "/path/to/client-key.pem"
+      insecure_skip_verify: false
+
+    # Multiple producers
     producers:
       - name: "high-throughput-producer"
         enabled: true
-        topic: "high-throughput-topic"
-        options:
-          batch_size: 65536
-          batch_timeout: "5ms"
-          compression: "lz4"
-          max_retries: 5
-          retry_backoff: "200ms"
-          acks: "all"
-          idempotent: true
-    
-    # Consumer configuration
+        topics: ["high-throughput-topic"]
+        required_acks: -1           # all ISR
+        compression: "lz4"
+        max_retries: 5
+        retry_backoff: { nanos: 200000000 }   # 200ms
+        batch_size: 200             # enable BatchProcessor with 200 records
+        batch_timeout: { nanos: 5000000 }     # 5ms linger / flush
+
+    # Multiple consumers
     consumers:
       - name: "batch-consumer"
         enabled: true
-        topics:
-          - "batch-topic"
+        topics: ["batch-topic"]
         group_id: "batch-consumer-group"
-        options:
-          auto_offset_reset: "earliest"
-          enable_auto_commit: false
-          max_poll_records: 1000
-          session_timeout: 30s
-          heartbeat_interval: 3s
-          fetch_min_bytes: 1
-          fetch_max_wait: "500ms"
+        start_offset: "earliest"
+        auto_commit: false
+        max_concurrency: 10
+        max_batch_size: 1000
+        max_wait_time: { nanos: 500000000 }   # 500ms
+        rebalance_timeout: { seconds: 30 }
 ```
 
 ## Usage
@@ -156,12 +222,12 @@ package main
 
 import (
     "context"
-    "github.com/go-lynx/lynx/plugins/mq/kafka"
+    "github.com/go-lynx/lynx-kafka"
 )
 
 func main() {
-    // Get Kafka client from plugin manager
-    client := pluginManager.GetPlugin("kafka").(kafka.ClientInterface)
+    // Get Kafka client from plugin manager. The registered plugin name is "kafka.client".
+    client := pluginManager.GetPlugin("kafka.client").(kafka.ClientInterface)
     
     // Send message
     err := client.Produce(ctx, "test-topic", []byte("key"), []byte("Hello Kafka"))
@@ -191,7 +257,7 @@ records := []*kgo.Record{
     {Topic: "test-topic", Key: []byte("key1"), Value: []byte("value1")},
     {Topic: "test-topic", Key: []byte("key2"), Value: []byte("value2")},
 }
-err = client.ProduceBatch(ctx, "test-topic", records)
+err = client.ProduceBatchWith(ctx, "high-throughput-producer", "test-topic", records)
 
 // Subscribe with specific consumer
 err = client.SubscribeWith(ctx, "batch-consumer", []string{"test-topic"}, messageHandler)
@@ -230,16 +296,18 @@ The main client interface providing access to all Kafka functionality.
 - `Produce(ctx context.Context, topic string, key, value []byte) error` - Send a message
 - `ProduceWith(ctx context.Context, producerName, topic string, key, value []byte) error` - Send with specific producer
 - `ProduceBatch(ctx context.Context, topic string, records []*kgo.Record) error` - Send batch messages
+- `ProduceBatchWith(ctx context.Context, producerName, topic string, records []*kgo.Record) error` - Send batch messages with a specific producer
 - `Subscribe(ctx context.Context, topics []string, handler MessageHandler) error` - Subscribe to topics
 - `SubscribeWith(ctx context.Context, consumerName string, topics []string, handler MessageHandler) error` - Subscribe with specific consumer
 - `SubscribeWithOptions(ctx context.Context, consumerName string, topics []string, handler MessageHandler, opts *ConsumerGroupOptions) error` - Subscribe with options (e.g. HandlerTimeout, MaxConcurrency)
 
 #### Management Methods
 
-- `GetProducer() *kgo.Client` - Get default producer instance
-- `GetConsumer() *kgo.Client` - Get consumer instance
-- `IsProducerReady(name string) bool` - Check producer status
-- `IsConsumerReady(name string) bool` - Check consumer status
+- `GetProducer() *kgo.Client` - Get the default producer instance selected during startup
+- `GetConsumer() *kgo.Client` - Get the compatibility consumer handle or any initialized consumer instance
+- `IsProducerReady() bool` - Check whether the default producer is ready
+- `IsConsumerReady() bool` - Check whether at least one consumer is ready
+- `ShutdownTasks() error` - Stop producers, consumers, and background managers during plugin shutdown
 #### Monitoring Methods
 
 - `GetMetrics() *Metrics` - Get performance metrics
@@ -295,13 +363,13 @@ The plugin exposes comprehensive Prometheus metrics:
 ```yaml
 producers:
   - name: "optimized-producer"
-    options:
-      batch_size: 65536          # Increase batch size
-      batch_timeout: "5ms"       # Reduce batch timeout
-      compression: "lz4"         # Use efficient compression
-      acks: "1"                  # Reduce acknowledgment overhead
-      retries: 3                 # Configure retries
-      retry_backoff: "100ms"     # Retry backoff
+    enabled: true
+    required_acks: 1
+    max_retries: 3
+    retry_backoff: { nanos: 100000000 }   # 100ms
+    batch_size: 200                       # Increase async batch size
+    batch_timeout: { nanos: 5000000 }     # 5ms
+    compression: "lz4"
 ```
 
 ### Consumer Optimization
@@ -309,12 +377,16 @@ producers:
 ```yaml
 consumers:
   - name: "optimized-consumer"
-    options:
-      max_poll_records: 1000     # Increase poll size
-      fetch_min_bytes: 1024      # Minimum fetch size
-      fetch_max_wait: "500ms"    # Maximum fetch wait
-      session_timeout: "30s"     # Session timeout
-      heartbeat_interval: "3s"   # Heartbeat interval
+    enabled: true
+    group_id: "optimized-group"
+    topics: ["orders"]
+    start_offset: "earliest"
+    max_concurrency: 10
+    min_batch_size: 100
+    max_batch_size: 1000
+    max_wait_time: { nanos: 500000000 }   # 500ms
+    rebalance_timeout: { seconds: 30 }
+    auto_commit: false
 ```
 
 ## Troubleshooting
@@ -343,14 +415,12 @@ consumers:
 
 ### Debug Mode
 
-Enable debug logging for detailed troubleshooting:
+Enable framework debug logging for detailed troubleshooting:
 
 ```yaml
 lynx:
-  kafka:
-    logging:
-      level: "DEBUG"
-      enable_sarama_logger: true
+  log:
+    level: debug
 ```
 
 ## Best Practices

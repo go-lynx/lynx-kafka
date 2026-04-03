@@ -56,7 +56,7 @@ type Error struct {
 	Message string
 	Cause   error
 	Time    time.Time
-	Context map[string]interface{}
+	Context map[string]any
 }
 
 // Error implements error interface
@@ -79,7 +79,7 @@ func NewError(errType ErrorType, message string, cause error) *Error {
 		Message: message,
 		Cause:   cause,
 		Time:    time.Now(),
-		Context: make(map[string]interface{}),
+		Context: make(map[string]any),
 	}
 }
 
@@ -188,11 +188,11 @@ func (cb *CircuitBreaker) GetState() CircuitBreakerState {
 }
 
 // GetStats gets circuit breaker statistics
-func (cb *CircuitBreaker) GetStats() map[string]interface{} {
+func (cb *CircuitBreaker) GetStats() map[string]any {
 	cb.mu.RLock()
 	defer cb.mu.RUnlock()
 
-	return map[string]interface{}{
+	return map[string]any{
 		"state":           cb.state,
 		"failure_count":   cb.failureCount,
 		"threshold":       cb.threshold,

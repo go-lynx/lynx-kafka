@@ -94,8 +94,8 @@ func (m *Metrics) SetConsumerLatency(latency time.Duration) {
 }
 
 // GetStats gets statistics
-func (m *Metrics) GetStats() map[string]interface{} {
-	return map[string]interface{}{
+func (m *Metrics) GetStats() map[string]any {
+	return map[string]any{
 		"produced_messages":    m.producedMessages.Load(),
 		"produced_bytes":       m.producedBytes.Load(),
 		"producer_errors":      m.producerErrors.Load(),
