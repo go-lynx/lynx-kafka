@@ -100,6 +100,7 @@ func (k *Client) startupTasksContext(ctx context.Context) (startErr error) {
 	if err := ctx.Err(); err != nil {
 		return fmt.Errorf("kafka startup canceled before execution: %w", err)
 	}
+	k.publishRuntimeContract(false, false)
 
 	k.ensureLifecycleContext()
 
@@ -189,6 +190,10 @@ func (k *Client) startupTasksContext(ctx context.Context) (startErr error) {
 		if err := k.rt.RegisterSharedResource(pluginName, k); err != nil {
 			return fmt.Errorf("failed to register Kafka shared resource: %w", err)
 		}
+		k.registerRuntimePluginAlias()
+		if err := k.rt.RegisterPrivateResource("config", k.conf); err != nil {
+			log.Warnf("failed to register Kafka private config resource: %v", err)
+		}
 		if len(k.producers) > 0 {
 			if err := k.rt.RegisterPrivateResource("producers", k.producers); err != nil {
 				log.Warnf("failed to register Kafka private producers resource: %v", err)
@@ -231,6 +236,12 @@ func (k *Client) startupTasksContext(ctx context.Context) (startErr error) {
 		}
 	}
 
+	if err := k.CheckHealth(); err != nil {
+		k.publishRuntimeContract(false, false)
+		return err
+	}
+	k.publishRuntimeContract(true, true)
+
 	return nil
 }
 
@@ -238,6 +249,7 @@ func (k *Client) shutdownTasksContext(ctx context.Context) error {
 	if err := ctx.Err(); err != nil {
 		return fmt.Errorf("kafka shutdown canceled before execution: %w", err)
 	}
+	k.publishRuntimeContract(false, false)
 
 	k.cancel()
 
