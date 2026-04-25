@@ -97,6 +97,9 @@ func (k *Client) CleanupTasks() error {
 }
 
 func (k *Client) startupTasksContext(ctx context.Context) (startErr error) {
+	if k.conf == nil {
+		return ErrInvalidConfiguration
+	}
 	if err := ctx.Err(); err != nil {
 		return fmt.Errorf("kafka startup canceled before execution: %w", err)
 	}

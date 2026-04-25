@@ -16,8 +16,9 @@ type BatchProcessor struct {
 	handler      func(context.Context, []*kgo.Record) error
 	records      []*kgo.Record
 	mu           sync.Mutex
+	wg           sync.WaitGroup
 	timer        *time.Timer
-	done         chan struct{}
+	closed       bool
 }
 
 // NewBatchProcessor creates a new batch processor
@@ -27,15 +28,21 @@ func NewBatchProcessor(maxBatchSize int, maxWaitTime time.Duration, handler func
 		maxWaitTime:  maxWaitTime,
 		handler:      handler,
 		records:      make([]*kgo.Record, 0, maxBatchSize),
-		done:         make(chan struct{}),
 	}
 	return bp
 }
 
 // AddRecord adds a record to the batch processor
 func (bp *BatchProcessor) AddRecord(ctx context.Context, record *kgo.Record) error {
+	if record == nil {
+		return nil
+	}
 	bp.mu.Lock()
 	defer bp.mu.Unlock()
+
+	if bp.closed {
+		return ErrBatchProcessorClosed
+	}
 
 	bp.records = append(bp.records, record)
 
@@ -51,7 +58,7 @@ func (bp *BatchProcessor) AddRecord(ctx context.Context, record *kgo.Record) err
 		bp.timer = time.AfterFunc(bp.maxWaitTime, func() {
 			bp.mu.Lock()
 			defer bp.mu.Unlock()
-			if len(bp.records) > 0 {
+			if !bp.closed && len(bp.records) > 0 {
 				_ = bp.processBatchLocked(context.Background(), false)
 			}
 		})
@@ -88,7 +95,9 @@ func (bp *BatchProcessor) processBatchLocked(ctx context.Context, sync bool) err
 	}
 
 	// Async: process in background
+	bp.wg.Add(1)
 	go func() {
+		defer bp.wg.Done()
 		if err := bp.handler(ctx, records); err != nil {
 			log.ErrorfCtx(ctx, "Batch processing failed: %v", err)
 		}
@@ -100,13 +109,45 @@ func (bp *BatchProcessor) processBatchLocked(ctx context.Context, sync bool) err
 // Flush forces processing of all pending records and waits for completion.
 func (bp *BatchProcessor) Flush(ctx context.Context) error {
 	bp.mu.Lock()
-	defer bp.mu.Unlock()
-	return bp.processBatchLocked(ctx, true)
+	err := bp.processBatchLocked(ctx, true)
+	bp.mu.Unlock()
+	if err != nil {
+		return err
+	}
+	return bp.wait(ctx)
 }
 
 // Close closes the batch processor
 func (bp *BatchProcessor) Close() {
-	close(bp.done)
+	bp.mu.Lock()
+	if bp.closed {
+		bp.mu.Unlock()
+		return
+	}
+	bp.closed = true
+	if bp.timer != nil {
+		bp.timer.Stop()
+		bp.timer = nil
+	}
+	bp.records = bp.records[:0]
+	bp.mu.Unlock()
+}
+
+func (bp *BatchProcessor) wait(ctx context.Context) error {
+	if ctx == nil {
+		ctx = context.Background()
+	}
+	done := make(chan struct{})
+	go func() {
+		bp.wg.Wait()
+		close(done)
+	}()
+	select {
+	case <-ctx.Done():
+		return ctx.Err()
+	case <-done:
+		return nil
+	}
 }
 
 // BatchConfig batch processing configuration

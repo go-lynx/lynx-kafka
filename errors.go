@@ -35,6 +35,7 @@ var (
 	ErrBrokerUnavailable      = errors.New("broker unavailable")
 	ErrMessageSerialization   = errors.New("message serialization failed")
 	ErrMessageDeserialization = errors.New("message deserialization failed")
+	ErrBatchProcessorClosed   = errors.New("kafka batch processor is closed")
 )
 
 // ErrorType error type

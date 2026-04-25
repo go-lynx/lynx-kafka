@@ -39,7 +39,7 @@ func (k *Client) initProducerInstance(name string, p *conf.Producer) (*kgo.Clien
 	}
 
 	// TLS configuration
-	if k.conf.Tls != nil && k.conf.Tls.Enabled {
+	if k.conf != nil && k.conf.Tls != nil && k.conf.Tls.Enabled {
 		tlsCfg, err := buildTLSConfig(k.conf.Tls)
 		if err != nil {
 			return nil, fmt.Errorf("buildTLSConfig failed: %w", err)

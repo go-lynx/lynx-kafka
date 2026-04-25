@@ -24,19 +24,14 @@ func NewGoroutinePool(size int) *GoroutinePool {
 
 // Submit submits a task to the pool for execution
 func (p *GoroutinePool) Submit(task func()) {
-	p.mu.RLock()
-	closed := p.closed
-	p.mu.RUnlock()
-
-	if closed {
-		// If pool is closed, execute task in current goroutine
-		if task != nil {
-			task()
-		}
+	p.mu.Lock()
+	if p.closed {
+		p.mu.Unlock()
 		return
 	}
-
 	p.wg.Add(1)
+	p.mu.Unlock()
+
 	select {
 	case p.ch <- struct{}{}: // Acquire token
 		go func() {
@@ -53,17 +48,16 @@ func (p *GoroutinePool) Submit(task func()) {
 		}()
 	default:
 		// If pool is full, execute task in current goroutine (with panic recovery)
-		p.wg.Done()
-		if task != nil {
-			func() {
-				defer func() {
-					if r := recover(); r != nil {
-						log.Errorf("GoroutinePool task panic recovered: %v", r)
-					}
-				}()
-				task()
-			}()
+		defer p.wg.Done()
+		if task == nil {
+			return
 		}
+		defer func() {
+			if r := recover(); r != nil {
+				log.Errorf("GoroutinePool task panic recovered: %v", r)
+			}
+		}()
+		task()
 	}
 }
 
@@ -76,11 +70,7 @@ func (p *GoroutinePool) Wait() {
 // After Close(), no new tasks will be accepted, but existing tasks will complete
 func (p *GoroutinePool) Close() {
 	p.mu.Lock()
-	if !p.closed {
-		p.closed = true
-		// Close channel to signal no more tasks
-		close(p.ch)
-	}
+	p.closed = true
 	p.mu.Unlock()
 	// Wait for all tasks to complete
 	p.wg.Wait()

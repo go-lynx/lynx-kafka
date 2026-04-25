@@ -16,8 +16,8 @@ kafka:
   sasl:
     enabled: false
     mechanism: "PLAIN"           # PLAIN | SCRAM-SHA-256 | SCRAM-SHA-512
-    username: "user"
-    password: "pass"
+    username: ""
+    password: ""                  # Inject through a secret manager when SASL is enabled
 
   dial_timeout: 5s
 

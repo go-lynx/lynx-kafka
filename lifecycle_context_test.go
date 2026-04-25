@@ -42,6 +42,15 @@ func TestClient_StartContext_ReturnsProducerConnectivityError(t *testing.T) {
 	}
 }
 
+func TestClient_StartContext_ReturnsInvalidConfigurationWhenMissingConfig(t *testing.T) {
+	client := NewKafkaClient()
+
+	err := client.StartContext(context.Background(), client)
+	if !errors.Is(err, ErrInvalidConfiguration) {
+		t.Fatalf("expected ErrInvalidConfiguration, got %v", err)
+	}
+}
+
 func TestClient_ShutdownTasks_ReturnsBatchFlushError(t *testing.T) {
 	client := NewKafkaClient()
 	client.batchProcessors["default"] = NewBatchProcessor(10, time.Hour, func(context.Context, []*kgo.Record) error {

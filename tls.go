@@ -7,12 +7,16 @@ import (
 	"os"
 
 	"github.com/go-lynx/lynx-kafka/conf"
+	"github.com/go-lynx/lynx/pkg/security"
 )
 
 // buildTLSConfig builds tls.Config based on configuration
 func buildTLSConfig(t *conf.TLS) (*tls.Config, error) {
 	if t == nil || !t.Enabled {
 		return nil, nil
+	}
+	if err := security.ValidateTLSProductionPolicy("kafka", true, t.InsecureSkipVerify); err != nil {
+		return nil, err
 	}
 
 	cfg := &tls.Config{

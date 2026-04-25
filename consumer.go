@@ -86,8 +86,10 @@ func (k *Client) NewConsumerGroupWithOptions(client *kgo.Client, c *conf.Consume
 		maxConc = opts.MaxConcurrency
 	}
 	autoCommit := false
+	groupID := ""
 	if c != nil {
 		autoCommit = c.AutoCommit
+		groupID = c.GetGroupId()
 	}
 	handlerTimeout := DefaultHandlerTimeout
 	if opts != nil && opts.HandlerTimeout > 0 {
@@ -95,7 +97,7 @@ func (k *Client) NewConsumerGroupWithOptions(client *kgo.Client, c *conf.Consume
 	}
 	return &ConsumerGroup{
 		client:         client,
-		groupID:        c.GetGroupId(),
+		groupID:        groupID,
 		topics:         topics,
 		handler:        handler,
 		pool:           NewGoroutinePool(maxConc),
@@ -115,9 +117,12 @@ func (k *Client) initConsumerInstance(name string, cconf *conf.Consumer) (*kgo.C
 	if cconf == nil {
 		return nil, fmt.Errorf("consumer config is nil for %s", name)
 	}
+	if k.conf == nil {
+		return nil, ErrInvalidConfiguration
+	}
 
 	dialTimeout := 10 * time.Second
-	if k.conf != nil && k.conf.DialTimeout != nil {
+	if k.conf.DialTimeout != nil {
 		dialTimeout = k.conf.DialTimeout.AsDuration()
 	}
 	opts := []kgo.Opt{
@@ -226,6 +231,9 @@ func (k *Client) Subscribe(ctx context.Context, topics []string, handler Message
 	if len(topics) == 0 {
 		return fmt.Errorf("no topics provided")
 	}
+	if k.conf == nil {
+		return ErrInvalidConfiguration
+	}
 	// Select the first enabled consumer as default
 	var chosen *conf.Consumer
 	var name string
@@ -252,6 +260,12 @@ func (k *Client) SubscribeWithOptions(ctx context.Context, consumerName string, 
 	if len(topics) == 0 {
 		return fmt.Errorf("no topics provided")
 	}
+	if handler == nil {
+		return fmt.Errorf("message handler is nil")
+	}
+	if k.conf == nil {
+		return ErrInvalidConfiguration
+	}
 	// Find matching configuration
 	var cconf *conf.Consumer
 	for _, c := range k.conf.Consumers {
@@ -273,21 +287,25 @@ func (k *Client) SubscribeWithOptions(ctx context.Context, consumerName string, 
 		if err != nil {
 			return err
 		}
-		registerConsumerHealth := false
-		k.mu.Lock()
-		k.consumers[consumerName] = cli
-		consumer = cli
-		// Start the consumer connection manager
-		if _, ok := k.consConnMgrs[consumerName]; !ok {
-			cm := NewConnectionManager(cli, k.conf.GetBrokers())
-			k.consConnMgrs[consumerName] = cm
-			cm.Start()
-			log.Infof("Kafka consumer[%s] connection manager started", consumerName)
-			// 持写锁时勿调用 registerHealthForConsumer（内部 RLock 会死锁）
-			registerConsumerHealth = true
+		cm := NewConnectionManager(cli, k.conf.GetBrokers())
+		if err := cm.StartWithContext(ctx); err != nil {
+			cm.Stop()
+			cli.Close()
+			return fmt.Errorf("consumer connection manager start failed: %w", err)
 		}
-		k.mu.Unlock()
-		if registerConsumerHealth {
+
+		k.mu.Lock()
+		if existing := k.consumers[consumerName]; existing != nil {
+			consumer = existing
+			k.mu.Unlock()
+			cm.Stop()
+			cli.Close()
+		} else {
+			k.consumers[consumerName] = cli
+			consumer = cli
+			k.consConnMgrs[consumerName] = cm
+			log.Infof("Kafka consumer[%s] connection manager started", consumerName)
+			k.mu.Unlock()
 			k.registerHealthForConsumer(consumerName)
 		}
 	}
@@ -391,22 +409,36 @@ func (cg *ConsumerGroup) processFetches(fetches kgo.Fetches) {
 					continue
 				}
 
-				// Send records to the serial channel of this partition to ensure in-partition ordering
-				ch := cg.getPartitionChan(topic.Topic, partition.Partition)
-				select {
-				case <-cg.ctx.Done():
+				if !cg.enqueuePartitionRecords(topic.Topic, partition.Partition, partition.Records) {
 					return
-				case ch <- partition.Records:
 				}
 			}
 		}
 	}
 }
 
+func (cg *ConsumerGroup) enqueuePartitionRecords(topic string, partition int32, records []*kgo.Record) bool {
+	cg.partMu.Lock()
+	defer cg.partMu.Unlock()
+
+	ch := cg.getPartitionChanLocked(topic, partition)
+	select {
+	case <-cg.ctx.Done():
+		return false
+	case ch <- records:
+		return true
+	}
+}
+
 // getPartitionChan gets or creates the serial channel for the given partition and starts its worker
 func (cg *ConsumerGroup) getPartitionChan(topic string, partition int32) chan []*kgo.Record {
-	key := cg.partitionKey(topic, partition)
 	cg.partMu.Lock()
+	defer cg.partMu.Unlock()
+	return cg.getPartitionChanLocked(topic, partition)
+}
+
+func (cg *ConsumerGroup) getPartitionChanLocked(topic string, partition int32) chan []*kgo.Record {
+	key := cg.partitionKey(topic, partition)
 	ch, ok := cg.partChans[key]
 	if !ok {
 		ch = make(chan []*kgo.Record, 1)
@@ -437,7 +469,6 @@ func (cg *ConsumerGroup) getPartitionChan(topic string, partition int32) chan []
 			}
 		}(topic, partition, ch)
 	}
-	cg.partMu.Unlock()
 	return ch
 }
 
@@ -559,7 +590,7 @@ func (cg *ConsumerGroup) Stop() {
 	}
 	cg.partMu.Unlock()
 	// Wait for in-flight tasks to complete
-	cg.pool.Wait()
+	cg.pool.Close()
 	// Wait for error/rebalance handler goroutines
 	cg.wg.Wait()
 }

@@ -9,6 +9,9 @@ import (
 
 // validateConfiguration validates the configuration
 func (k *Client) validateConfiguration() error {
+	if k.conf == nil {
+		return ErrInvalidConfiguration
+	}
 	if len(k.conf.Brokers) == 0 {
 		return ErrNoBrokersConfigured
 	}
@@ -146,6 +149,9 @@ func (k *Client) validateTLSConfig() error {
 
 // setDefaultValues sets default values
 func (k *Client) setDefaultValues() {
+	if k.conf == nil {
+		k.conf = &conf.Kafka{}
+	}
 	defaultConf := &conf.Kafka{
 		DialTimeout: &durationpb.Duration{Seconds: 10},
 		Producers: []*conf.Producer{
