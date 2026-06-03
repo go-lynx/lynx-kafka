@@ -67,7 +67,8 @@ func (k *Client) initProducerInstance(name string, p *conf.Producer) (*kgo.Clien
 		opts = append(opts, kgo.RequiredAcks(kgo.LeaderAck()))
 	}
 
-	// franz-go 默认开启幂等写入，仅允许 acks=all(-1)；leader/no ack 须关闭幂等
+	// franz-go enables idempotent writes by default, which requires acks=all (-1).
+	// Disable idempotency for leader-ack or no-ack modes.
 	if p.RequiredAcks != -1 {
 		opts = append(opts, kgo.DisableIdempotentWrite())
 	}

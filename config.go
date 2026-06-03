@@ -137,7 +137,8 @@ func (k *Client) validateTLSConfig() error {
 		return nil // TLS not enabled, no validation needed
 	}
 
-	// mTLS：证书与私钥须同时提供；仅加密到服务端时二者均可省略（与 proto 注释一致）
+	// For mTLS the certificate and key must be provided together.
+	// For server-only encryption both may be omitted.
 	certSet := k.conf.Tls.CertFile != ""
 	keySet := k.conf.Tls.KeyFile != ""
 	if certSet != keySet {

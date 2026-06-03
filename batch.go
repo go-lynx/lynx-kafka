@@ -98,6 +98,11 @@ func (bp *BatchProcessor) processBatchLocked(ctx context.Context, sync bool) err
 	bp.wg.Add(1)
 	go func() {
 		defer bp.wg.Done()
+		defer func() {
+			if r := recover(); r != nil {
+				log.ErrorfCtx(ctx, "Batch processing panic recovered: %v", r)
+			}
+		}()
 		if err := bp.handler(ctx, records); err != nil {
 			log.ErrorfCtx(ctx, "Batch processing failed: %v", err)
 		}

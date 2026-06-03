@@ -46,9 +46,16 @@ func NewHealthChecker(client *kgo.Client, interval, timeout time.Duration) *Heal
 	}
 }
 
-// Start starts the health check
+// Start starts the health check goroutine.
 func (hc *HealthChecker) Start() {
-	go hc.run()
+	go func() {
+		defer func() {
+			if r := recover(); r != nil {
+				log.WarnfCtx(hc.ctx, "health checker panic recovered: %v", r)
+			}
+		}()
+		hc.run()
+	}()
 }
 
 // Stop stops the health check
@@ -95,7 +102,7 @@ func (hc *HealthChecker) check() {
 		}
 		msg := err.Error()
 		if strings.Contains(msg, "bad certificate") {
-			log.WarnfCtx(hc.ctx, "Kafka health check failed (%d/%d): %v (TLS 对端拒绝客户端证书：Aiven 等需在 lynx.kafka.tls 配置 cert_file + key_file，与控制台 Access certificate/key 或 service.cert/service.key 对应)",
+			log.WarnfCtx(hc.ctx, "Kafka health check failed (%d/%d): %v (TLS peer rejected the client certificate; for managed clusters such as Aiven set cert_file + key_file in lynx.kafka.tls to match the Access Certificate / Access Key from the cluster console)",
 				hc.errorCount, hc.maxErrors, err)
 		} else {
 			log.WarnfCtx(hc.ctx, "Kafka health check failed (%d/%d): %v", hc.errorCount, hc.maxErrors, err)
@@ -171,10 +178,16 @@ type ConnectionManager struct {
 const initialReconnectBackoff = 2 * time.Second
 const maxReconnectBackoff = 60 * time.Second
 
-// 单次 Metadata 超时；过长会叠加超过 lynx.plugins.start_timeout（默认 5s）导致插件启动失败。
+// initialConnectivityTimeout is the per-attempt deadline for the bootstrap Metadata
+// request.  Keep this well below lynx.plugins.start_timeout (default 5 s) so that
+// multiple attempts still complete before the plugin startup deadline.
 const initialConnectivityTimeout = 2 * time.Second
 
-// 首次 Metadata 时 Broker 偶发 ILLEGAL_SASL_STATE（SASL 握手与后续请求交错，见 twmb/franz-go#249），短暂退避重试可恢复。次数与 initialConnectivityTimeout 乘积勿超过常见 start_timeout。
+// bootstrapMaxAttempts is the number of times the initial Metadata probe is retried.
+// Brokers occasionally return ILLEGAL_SASL_STATE when the SASL handshake and the first
+// Metadata request interleave (see twmb/franz-go#249); a short back-off recovers this.
+// Ensure bootstrapMaxAttempts × (initialConnectivityTimeout + bootstrapRetryBackoff) stays
+// under the typical plugin start_timeout.
 const bootstrapMaxAttempts = 4
 const bootstrapRetryBackoff = 100 * time.Millisecond
 
@@ -200,10 +213,12 @@ func NewConnectionManager(client *kgo.Client, brokers []string) *ConnectionManag
 	return cm
 }
 
-// Start starts the connection manager
+// Start starts the connection manager synchronously probing initial connectivity,
+// then starts the periodic health checker and reconnect handler.
+// The synchronous bootstrap ensures that Lynx's post-start CheckHealth() call does
+// not see isConnected==false with a nil lastError (which would be mis-reported as
+// "producer not connected" instead of a real broker error).
 func (cm *ConnectionManager) Start() {
-	// 必须先同步完成首次 Metadata，再启动周期性健康检查：Lynx 会在插件 Start 后立即同步
-	// CheckHealth()；若此处仍异步 bootstrap，会出现 isConnected==false 且 lastErr==nil，误报 producer not connected。
 	_ = cm.bootstrapConnectionStateWithContext(cm.ctx, true)
 	cm.healthChecker.Start()
 	go cm.handleReconnections()
@@ -250,6 +265,11 @@ func (cm *ConnectionManager) onUnhealthy(err error) {
 
 // handleReconnections handles reconnection
 func (cm *ConnectionManager) handleReconnections() {
+	defer func() {
+		if r := recover(); r != nil {
+			log.WarnfCtx(cm.ctx, "handleReconnections panic recovered: %v", r)
+		}
+	}()
 	for {
 		select {
 		case <-cm.ctx.Done():
@@ -316,10 +336,6 @@ func (cm *ConnectionManager) ForceReconnect() {
 	case cm.reconnectChan <- struct{}{}:
 	default:
 	}
-}
-
-func (cm *ConnectionManager) bootstrapConnectionState() {
-	_ = cm.bootstrapConnectionStateWithContext(cm.ctx, true)
 }
 
 func (cm *ConnectionManager) bootstrapConnectionStateWithContext(ctx context.Context, scheduleReconnect bool) error {

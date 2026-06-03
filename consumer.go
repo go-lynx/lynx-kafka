@@ -430,13 +430,6 @@ func (cg *ConsumerGroup) enqueuePartitionRecords(topic string, partition int32, 
 	}
 }
 
-// getPartitionChan gets or creates the serial channel for the given partition and starts its worker
-func (cg *ConsumerGroup) getPartitionChan(topic string, partition int32) chan []*kgo.Record {
-	cg.partMu.Lock()
-	defer cg.partMu.Unlock()
-	return cg.getPartitionChanLocked(topic, partition)
-}
-
 func (cg *ConsumerGroup) getPartitionChanLocked(topic string, partition int32) chan []*kgo.Record {
 	key := cg.partitionKey(topic, partition)
 	ch, ok := cg.partChans[key]
@@ -445,6 +438,11 @@ func (cg *ConsumerGroup) getPartitionChanLocked(topic string, partition int32) c
 		cg.partChans[key] = ch
 		// Start the serial worker for this partition
 		go func(t string, p int32, c chan []*kgo.Record) {
+			defer func() {
+				if r := recover(); r != nil {
+					log.ErrorfCtx(cg.ctx, "partition worker panic recovered [%s:%d]: %v", t, p, r)
+				}
+			}()
 			for {
 				select {
 				case <-cg.ctx.Done():
@@ -534,6 +532,11 @@ func (cg *ConsumerGroup) processRecordsSerial(topic string, partition int32, rec
 
 // handleErrors handles errors
 func (cg *ConsumerGroup) handleErrors() {
+	defer func() {
+		if r := recover(); r != nil {
+			log.ErrorfCtx(cg.ctx, "handleErrors panic recovered: %v", r)
+		}
+	}()
 	for {
 		select {
 		case <-cg.ctx.Done():
@@ -547,6 +550,11 @@ func (cg *ConsumerGroup) handleErrors() {
 
 // handleRebalances handles partition rebalances
 func (cg *ConsumerGroup) handleRebalances() {
+	defer func() {
+		if r := recover(); r != nil {
+			log.ErrorfCtx(cg.ctx, "handleRebalances panic recovered: %v", r)
+		}
+	}()
 	for {
 		select {
 		case <-cg.ctx.Done():
