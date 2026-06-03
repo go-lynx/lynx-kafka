@@ -1,3 +1,7 @@
+// Package kafka provides a production-grade Apache Kafka plugin for the Lynx framework.
+// It manages multiple named producers and consumers, each backed by an independent kgo.Client,
+// with per-instance circuit breakers, retry handlers, batch processors, and connection managers.
+// All lifecycle operations are context-aware and support graceful shutdown with in-flight flush.
 package kafka
 
 import (
@@ -86,7 +90,8 @@ func (k *Client) InitializeResources(rt plugins.Runtime) error {
 		return fmt.Errorf("%w: %v", ErrInvalidConfiguration, err)
 	}
 
-	// 先补全默认值再校验（否则未填 max_concurrency 等字段时为 0 会误报失败）
+	// Apply defaults before validation so zero-value fields (e.g. max_concurrency) don't
+	// trigger false-positive validation errors.
 	k.setDefaultValues()
 
 	if err := k.validateConfiguration(); err != nil {
@@ -98,7 +103,8 @@ func (k *Client) InitializeResources(rt plugins.Runtime) error {
 	return nil
 }
 
-// logTLSClientCertHint 在启用 TLS 但未配置客户端证书时给出一次性提示，避免仅依赖健康检查里的 tls: bad certificate 才排查
+// logTLSClientCertHint warns once when TLS is enabled but no client certificate is configured,
+// so operators can diagnose "remote error: tls: bad certificate" before a health-check failure.
 func (k *Client) logTLSClientCertHint() {
 	if k.conf == nil || k.conf.Tls == nil || !k.conf.Tls.Enabled {
 		return
@@ -106,7 +112,7 @@ func (k *Client) logTLSClientCertHint() {
 	if k.conf.Tls.CertFile != "" && k.conf.Tls.KeyFile != "" {
 		return
 	}
-	log.Warnf("lynx.kafka.tls: 未设置 cert_file/key_file。若连接 Aiven 等集群并在健康检查中出现 remote error: tls: bad certificate，请在控制台下载 Access certificate 与 Access key（或 service.cert / service.key），写入 certs/ 并在配置中填写 cert_file、key_file（YAML 须为下划线命名）")
+	log.Warnf("lynx.kafka.tls: cert_file/key_file are not set. If you are connecting to a managed cluster (e.g. Aiven) and see 'remote error: tls: bad certificate' in health checks, download the Access Certificate and Access Key from the cluster console (service.cert / service.key) and set cert_file and key_file in your configuration.")
 }
 
 // StartupTasks startup tasks
