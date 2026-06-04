@@ -13,7 +13,9 @@ import (
 	"github.com/twmb/franz-go/pkg/kmsg"
 )
 
-// HealthChecker performs health checks on Kafka connections
+// HealthChecker periodically probes a client with a Metadata request and flips
+// to unhealthy after maxErrors consecutive failures, firing the configured
+// callbacks on state transitions.
 type HealthChecker struct {
 	client      *kgo.Client
 	interval    time.Duration
@@ -30,7 +32,7 @@ type HealthChecker struct {
 	onUnhealthy func(error)
 }
 
-// NewHealthChecker creates a new health checker
+// NewHealthChecker starts healthy with a 3-failure tolerance and no-op callbacks.
 func NewHealthChecker(client *kgo.Client, interval, timeout time.Duration) *HealthChecker {
 	ctx, cancel := context.WithCancel(context.Background())
 	return &HealthChecker{
@@ -63,7 +65,6 @@ func (hc *HealthChecker) Stop() {
 	hc.cancel()
 }
 
-// run runs the health check loop
 func (hc *HealthChecker) run() {
 	ticker := time.NewTicker(hc.interval)
 	defer ticker.Stop()
@@ -78,13 +79,11 @@ func (hc *HealthChecker) run() {
 	}
 }
 
-// check performs health check
 func (hc *HealthChecker) check() {
-	// Probe cluster health through Metadata request
 	ctx, cancel := context.WithTimeout(hc.ctx, hc.timeout)
 	defer cancel()
 
-	// Send empty MetadataRequest (request metadata for all topics)
+	// An empty MetadataRequest probes overall cluster reachability.
 	var req kmsg.MetadataRequest
 	_, err := req.RequestWith(ctx, hc.client)
 
@@ -97,7 +96,7 @@ func (hc *HealthChecker) check() {
 		hc.lastErr = err
 		if hc.isHealthy && hc.errorCount >= hc.maxErrors {
 			hc.isHealthy = false
-			// Callback should not block main loop
+			// Run the callback off the check loop so it can't stall probes.
 			go hc.onUnhealthy(err)
 		}
 		msg := err.Error()
@@ -111,14 +110,13 @@ func (hc *HealthChecker) check() {
 	}
 
 	if !hc.isHealthy {
-		// Status changed from unhealthy -> healthy
+		// Recovered: unhealthy -> healthy.
 		hc.isHealthy = true
 		hc.errorCount = 0
 		hc.lastErr = nil
 		go hc.onHealthy()
 		log.InfofCtx(hc.ctx, "Kafka health recovered")
 	} else {
-		// Maintain health, reset error count
 		hc.errorCount = 0
 		hc.lastErr = nil
 	}
@@ -131,28 +129,25 @@ func (hc *HealthChecker) GetLastError() error {
 	return hc.lastErr
 }
 
-// IsHealthy checks if the connection is healthy
 func (hc *HealthChecker) IsHealthy() bool {
 	hc.mu.RLock()
 	defer hc.mu.RUnlock()
 	return hc.isHealthy
 }
 
-// GetLastCheck gets the last check time
 func (hc *HealthChecker) GetLastCheck() time.Time {
 	hc.mu.RLock()
 	defer hc.mu.RUnlock()
 	return hc.lastCheck
 }
 
-// GetErrorCount gets the error count
 func (hc *HealthChecker) GetErrorCount() int {
 	hc.mu.RLock()
 	defer hc.mu.RUnlock()
 	return hc.errorCount
 }
 
-// SetCallbacks sets callback functions
+// SetCallbacks installs the handlers invoked on health state transitions.
 func (hc *HealthChecker) SetCallbacks(onHealthy func(), onUnhealthy func(error)) {
 	hc.mu.Lock()
 	defer hc.mu.Unlock()
@@ -160,7 +155,8 @@ func (hc *HealthChecker) SetCallbacks(onHealthy func(), onUnhealthy func(error))
 	hc.onUnhealthy = onUnhealthy
 }
 
-// ConnectionManager manages Kafka connections
+// ConnectionManager tracks connectivity for one client: it runs the health
+// checker and, on health loss, drives reconnection with exponential backoff.
 type ConnectionManager struct {
 	client           *kgo.Client
 	brokers          []string
@@ -174,7 +170,7 @@ type ConnectionManager struct {
 	reconnectBackoff time.Duration // exponential backoff for reconnect
 }
 
-// Initial reconnect backoff
+// Reconnect backoff grows from initialReconnectBackoff up to maxReconnectBackoff.
 const initialReconnectBackoff = 2 * time.Second
 const maxReconnectBackoff = 60 * time.Second
 
@@ -191,7 +187,6 @@ const initialConnectivityTimeout = 2 * time.Second
 const bootstrapMaxAttempts = 4
 const bootstrapRetryBackoff = 100 * time.Millisecond
 
-// NewConnectionManager creates a new connection manager
 func NewConnectionManager(client *kgo.Client, brokers []string) *ConnectionManager {
 	ctx, cancel := context.WithCancel(context.Background())
 	cm := &ConnectionManager{
@@ -203,7 +198,6 @@ func NewConnectionManager(client *kgo.Client, brokers []string) *ConnectionManag
 		reconnectBackoff: initialReconnectBackoff,
 	}
 
-	// Create health checker
 	cm.healthChecker = NewHealthChecker(client, 30*time.Second, 10*time.Second)
 	cm.healthChecker.SetCallbacks(
 		func() { cm.onHealthy() },
@@ -239,31 +233,27 @@ func (cm *ConnectionManager) StartWithContext(ctx context.Context) error {
 	return nil
 }
 
-// Stop stops the connection manager
 func (cm *ConnectionManager) Stop() {
 	cm.cancel()
 	cm.healthChecker.Stop()
 }
 
-// onHealthy callback when connection is restored
 func (cm *ConnectionManager) onHealthy() {
 	cm.markConnected()
 	log.InfofCtx(cm.ctx, "Kafka connection established")
 }
 
-// onUnhealthy callback when connection fails
 func (cm *ConnectionManager) onUnhealthy(err error) {
 	cm.markDisconnected(err)
 	log.ErrorfCtx(cm.ctx, "Kafka connection lost: %v", err)
 
-	// Trigger reconnection
 	select {
 	case cm.reconnectChan <- struct{}{}:
 	default:
 	}
 }
 
-// handleReconnections handles reconnection
+// handleReconnections serves reconnect requests until the context is canceled.
 func (cm *ConnectionManager) handleReconnections() {
 	defer func() {
 		if r := recover(); r != nil {
@@ -280,14 +270,14 @@ func (cm *ConnectionManager) handleReconnections() {
 	}
 }
 
-// reconnect reconnection logic with exponential backoff
+// reconnect nudges franz-go (which manages connections itself) with a Metadata
+// request, then waits out the current backoff and doubles it for next time.
 func (cm *ConnectionManager) reconnect() {
 	cm.mu.Lock()
 	backoff := cm.reconnectBackoff
 	cm.mu.Unlock()
 
 	log.InfofCtx(cm.ctx, "Attempting to reconnect to Kafka (backoff %v)...", backoff)
-	// franz-go has built-in connection management, trigger a Metadata request to accelerate recovery
 	ctx, cancel := context.WithTimeout(cm.ctx, 10*time.Second)
 	defer cancel()
 	var req kmsg.MetadataRequest
@@ -301,7 +291,6 @@ func (cm *ConnectionManager) reconnect() {
 		return
 	case <-time.After(backoff):
 	}
-	// Exponential backoff for next attempt, cap at max
 	cm.mu.Lock()
 	nextBackoff := backoff * 2
 	if nextBackoff > maxReconnectBackoff {
@@ -311,7 +300,6 @@ func (cm *ConnectionManager) reconnect() {
 	cm.mu.Unlock()
 }
 
-// IsConnected checks if connected
 func (cm *ConnectionManager) IsConnected() bool {
 	cm.mu.RLock()
 	defer cm.mu.RUnlock()
@@ -325,12 +313,11 @@ func (cm *ConnectionManager) LastError() error {
 	return cm.lastErr
 }
 
-// GetHealthChecker gets the health checker
 func (cm *ConnectionManager) GetHealthChecker() *HealthChecker {
 	return cm.healthChecker
 }
 
-// ForceReconnect forces reconnection
+// ForceReconnect requests a reconnect attempt; a no-op if one is already queued.
 func (cm *ConnectionManager) ForceReconnect() {
 	select {
 	case cm.reconnectChan <- struct{}{}:

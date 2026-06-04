@@ -16,7 +16,9 @@ import (
 	"github.com/twmb/franz-go/pkg/kgo"
 )
 
-// Client Kafka client plugin
+// Client is the Kafka plugin. It owns the named producer/consumer instances and
+// their per-instance circuit breakers, retry handlers, batch processors, and
+// connection managers, all guarded by mu.
 type Client struct {
 	*plugins.BasePlugin
 	conf *conf.Kafka
@@ -49,7 +51,6 @@ var _ ClientInterface = (*Client)(nil)
 var _ Producer = (*Client)(nil)
 var _ Consumer = (*Client)(nil)
 
-// NewKafkaClient creates a new Kafka client plugin instance
 func NewKafkaClient() *Client {
 	ctx, cancel := context.WithCancel(context.Background())
 	return &Client{
@@ -76,7 +77,8 @@ func NewKafkaClient() *Client {
 	}
 }
 
-// InitializeResources initializes Kafka resources
+// InitializeResources loads and validates the plugin configuration, applying
+// defaults before validation so zero-value fields don't fail validation.
 func (k *Client) InitializeResources(rt plugins.Runtime) error {
 	if err := k.BasePlugin.InitializeResources(rt); err != nil {
 		return err
@@ -90,8 +92,6 @@ func (k *Client) InitializeResources(rt plugins.Runtime) error {
 		return fmt.Errorf("%w: %v", ErrInvalidConfiguration, err)
 	}
 
-	// Apply defaults before validation so zero-value fields (e.g. max_concurrency) don't
-	// trigger false-positive validation errors.
 	k.setDefaultValues()
 
 	if err := k.validateConfiguration(); err != nil {
@@ -115,26 +115,25 @@ func (k *Client) logTLSClientCertHint() {
 	log.Warnf("lynx.kafka.tls: cert_file/key_file are not set. If you are connecting to a managed cluster (e.g. Aiven) and see 'remote error: tls: bad certificate' in health checks, download the Access Certificate and Access Key from the cluster console (service.cert / service.key) and set cert_file and key_file in your configuration.")
 }
 
-// StartupTasks startup tasks
 func (k *Client) StartupTasks() error {
 	ctx, cancel := k.startupContext()
 	defer cancel()
 	return k.startupTasksContext(ctx)
 }
 
-// ShutdownTasks shutdown tasks
+// ShutdownTasks performs graceful shutdown bounded by a 5s timeout.
 func (k *Client) ShutdownTasks() error {
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 	defer cancel()
 	return k.shutdownTasksContext(ctx)
 }
 
-// GetMetrics gets monitoring metrics
 func (k *Client) GetMetrics() *Metrics {
 	return k.metrics
 }
 
-// retryConfigFromProducer builds RetryConfig from producer config
+// retryConfigFromProducer derives a RetryConfig from producer config, falling
+// back to defaults for unset fields.
 func (k *Client) retryConfigFromProducer(p *conf.Producer) RetryConfig {
 	cfg := DefaultRetryConfig()
 	if p == nil {
@@ -151,7 +150,7 @@ func (k *Client) retryConfigFromProducer(p *conf.Producer) RetryConfig {
 	return cfg
 }
 
-// getCircuitBreaker returns circuit breaker for producer
+// getCircuitBreaker returns the producer's circuit breaker, or nil if none.
 func (k *Client) getCircuitBreaker(producerName string) *CircuitBreaker {
 	k.mu.RLock()
 	cb := k.circuitBreakers[producerName]

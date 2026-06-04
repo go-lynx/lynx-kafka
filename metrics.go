@@ -28,72 +28,59 @@ type Metrics struct {
 	reconnections    atomic.Int64
 }
 
-// NewMetrics creates a new monitoring metrics instance
 func NewMetrics() *Metrics {
 	return &Metrics{}
 }
 
-// IncrementProducedMessages increments produced message count
 func (m *Metrics) IncrementProducedMessages(count int64) {
 	m.producedMessages.Add(count)
 }
 
-// IncrementProducedBytes increments produced byte count
 func (m *Metrics) IncrementProducedBytes(bytes int64) {
 	m.producedBytes.Add(bytes)
 }
 
-// IncrementProducerErrors increments producer error count
 func (m *Metrics) IncrementProducerErrors() {
 	m.producerErrors.Add(1)
 }
 
-// IncrementConsumedMessages increments consumed message count
 func (m *Metrics) IncrementConsumedMessages(count int64) {
 	m.consumedMessages.Add(count)
 }
 
-// IncrementConsumedBytes increments consumed byte count
 func (m *Metrics) IncrementConsumedBytes(bytes int64) {
 	m.consumedBytes.Add(bytes)
 }
 
-// IncrementConsumerErrors increments consumer error count
 func (m *Metrics) IncrementConsumerErrors() {
 	m.consumerErrors.Add(1)
 }
 
-// IncrementOffsetCommits increments offset commit count
 func (m *Metrics) IncrementOffsetCommits() {
 	m.offsetCommits.Add(1)
 }
 
-// IncrementOffsetCommitErrors increments offset commit error count
 func (m *Metrics) IncrementOffsetCommitErrors() {
 	m.offsetCommitErrors.Add(1)
 }
 
-// IncrementConnectionErrors increments connection error count
 func (m *Metrics) IncrementConnectionErrors() {
 	m.connectionErrors.Add(1)
 }
 
-// IncrementReconnections increments reconnection count
 func (m *Metrics) IncrementReconnections() {
 	m.reconnections.Add(1)
 }
 
-// SetProducerLatency sets producer latency
 func (m *Metrics) SetProducerLatency(latency time.Duration) {
 	m.producerLatency.Store(latency.Nanoseconds())
 }
 
-// SetConsumerLatency sets consumer latency
 func (m *Metrics) SetConsumerLatency(latency time.Duration) {
 	m.consumerLatency.Store(latency.Nanoseconds())
 }
 
-// GetStats gets statistics
+// GetStats returns a snapshot of all counters as a map.
 func (m *Metrics) GetStats() map[string]any {
 	return map[string]any{
 		"produced_messages":    m.producedMessages.Load(),
@@ -127,11 +114,10 @@ func (m *Metrics) Reset() {
 	m.reconnections.Store(0)
 }
 
-// GetPrometheusMetrics returns metrics in Prometheus format
+// GetPrometheusMetrics renders the counters in Prometheus text exposition format.
 func (m *Metrics) GetPrometheusMetrics() string {
 	var metrics []string
 
-	// Producer metrics
 	metrics = append(metrics,
 		"# HELP lynx_kafka_producer_messages_total Total number of messages produced to Kafka",
 		"# TYPE lynx_kafka_producer_messages_total counter",

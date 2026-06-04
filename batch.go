@@ -9,7 +9,9 @@ import (
 	"github.com/twmb/franz-go/pkg/kgo"
 )
 
-// BatchProcessor batch processor
+// BatchProcessor accumulates records and flushes them either when maxBatchSize
+// is reached or after maxWaitTime elapses, whichever comes first. Flushes run
+// asynchronously except for the explicit Flush call.
 type BatchProcessor struct {
 	maxBatchSize int
 	maxWaitTime  time.Duration
@@ -21,7 +23,6 @@ type BatchProcessor struct {
 	closed       bool
 }
 
-// NewBatchProcessor creates a new batch processor
 func NewBatchProcessor(maxBatchSize int, maxWaitTime time.Duration, handler func(context.Context, []*kgo.Record) error) *BatchProcessor {
 	bp := &BatchProcessor{
 		maxBatchSize: maxBatchSize,
@@ -32,7 +33,9 @@ func NewBatchProcessor(maxBatchSize int, maxWaitTime time.Duration, handler func
 	return bp
 }
 
-// AddRecord adds a record to the batch processor
+// AddRecord enqueues a record, triggering a flush if the batch is now full or
+// arming the wait-time timer for the first record of a new batch. A nil record
+// is ignored.
 func (bp *BatchProcessor) AddRecord(ctx context.Context, record *kgo.Record) error {
 	if record == nil {
 		return nil
@@ -46,7 +49,6 @@ func (bp *BatchProcessor) AddRecord(ctx context.Context, record *kgo.Record) err
 
 	bp.records = append(bp.records, record)
 
-	// If maximum batch size is reached, process immediately
 	if len(bp.records) >= bp.maxBatchSize {
 		return bp.processBatchLocked(ctx, false)
 	}
@@ -80,7 +82,8 @@ func (bp *BatchProcessor) processBatchLocked(ctx context.Context, sync bool) err
 		bp.timer = nil
 	}
 
-	// Copy records and clear original slice
+	// Hand the records off to the flush and reset the buffer so callers can
+	// keep appending while the flush runs.
 	records := make([]*kgo.Record, len(bp.records))
 	copy(records, bp.records)
 	bp.records = bp.records[:0]
@@ -122,7 +125,8 @@ func (bp *BatchProcessor) Flush(ctx context.Context) error {
 	return bp.wait(ctx)
 }
 
-// Close closes the batch processor
+// Close marks the processor closed and drops any unflushed records. Callers
+// wanting those records delivered must Flush first.
 func (bp *BatchProcessor) Close() {
 	bp.mu.Lock()
 	if bp.closed {
@@ -157,13 +161,14 @@ func (bp *BatchProcessor) wait(ctx context.Context) error {
 
 // BatchConfig batch processing configuration
 type BatchConfig struct {
-	MaxBatchSize int           // Maximum batch size
-	MaxWaitTime  time.Duration // Maximum wait time
-	Compression  string        // Compression type
-	RetryCount   int           // Retry count
+	MaxBatchSize int
+	MaxWaitTime  time.Duration
+	Compression  string
+	RetryCount   int
 }
 
-// DefaultBatchConfig default batch processing configuration
+// DefaultBatchConfig returns batch defaults: 1000 records or 100ms wait, no
+// compression, 3 retries.
 func DefaultBatchConfig() *BatchConfig {
 	return &BatchConfig{
 		MaxBatchSize: 1000,

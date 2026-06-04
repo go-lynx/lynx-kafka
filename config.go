@@ -7,7 +7,8 @@ import (
 	"google.golang.org/protobuf/types/known/durationpb"
 )
 
-// validateConfiguration validates the configuration
+// validateConfiguration checks brokers, enabled producer/consumer instances, and
+// SASL/TLS settings, returning the first problem found.
 func (k *Client) validateConfiguration() error {
 	if k.conf == nil {
 		return ErrInvalidConfiguration
@@ -16,7 +17,6 @@ func (k *Client) validateConfiguration() error {
 		return ErrNoBrokersConfigured
 	}
 
-	// Validate producer configurations (multiple instances)
 	for _, p := range k.conf.Producers {
 		if p != nil && p.Enabled {
 			if err := k.validateProducerConfig(p); err != nil {
@@ -25,7 +25,6 @@ func (k *Client) validateConfiguration() error {
 		}
 	}
 
-	// Validate consumer configurations (multiple instances)
 	for _, c := range k.conf.Consumers {
 		if c != nil && c.Enabled {
 			if err := k.validateConsumerConfig(c); err != nil {
@@ -34,14 +33,12 @@ func (k *Client) validateConfiguration() error {
 		}
 	}
 
-	// Validate SASL configuration
 	if k.conf.Sasl != nil && k.conf.Sasl.Enabled {
 		if err := k.validateSASLConfig(); err != nil {
 			return fmt.Errorf("SASL config validation failed: %w", err)
 		}
 	}
 
-	// Validate TLS configuration
 	if k.conf.Tls != nil && k.conf.Tls.Enabled {
 		if err := k.validateTLSConfig(); err != nil {
 			return fmt.Errorf("TLS config validation failed: %w", err)
@@ -51,7 +48,6 @@ func (k *Client) validateConfiguration() error {
 	return nil
 }
 
-// validateProducerConfig validates producer configuration
 func (k *Client) validateProducerConfig(p *conf.Producer) error {
 	if p.Compression != "" {
 		validCompressions := map[string]bool{
@@ -65,14 +61,13 @@ func (k *Client) validateProducerConfig(p *conf.Producer) error {
 			return fmt.Errorf("%w: %s", ErrInvalidCompression, p.Compression)
 		}
 	}
-	// Validate RequiredAcks value range: allowed -1, 0, 1
+	// RequiredAcks must be -1 (all ISR), 0 (none), or 1 (leader).
 	if p.RequiredAcks != -1 && p.RequiredAcks != 0 && p.RequiredAcks != 1 {
 		return fmt.Errorf("invalid required_acks: %d (allowed: -1,0,1)", p.RequiredAcks)
 	}
 	return nil
 }
 
-// validateConsumerConfig validates consumer configuration
 func (k *Client) validateConsumerConfig(c *conf.Consumer) error {
 	if c.GroupId == "" {
 		return ErrNoGroupID
@@ -95,7 +90,6 @@ func (k *Client) validateConsumerConfig(c *conf.Consumer) error {
 	return nil
 }
 
-// validateSASLConfig validates SASL configuration
 func (k *Client) validateSASLConfig() error {
 	if k.conf.Sasl == nil {
 		return fmt.Errorf("SASL configuration is nil")
@@ -105,7 +99,6 @@ func (k *Client) validateSASLConfig() error {
 		return nil // SASL not enabled, no validation needed
 	}
 
-	// Validate mechanism type
 	validMechanisms := map[string]bool{
 		SASLPlain:       true,
 		SASLScramSHA256: true,
@@ -116,7 +109,6 @@ func (k *Client) validateSASLConfig() error {
 		return fmt.Errorf("%w: %s", ErrInvalidSASLMechanism, k.conf.Sasl.Mechanism)
 	}
 
-	// Validate username and password
 	if k.conf.Sasl.Username == "" {
 		return fmt.Errorf("SASL username is required when SASL is enabled")
 	}
@@ -127,7 +119,6 @@ func (k *Client) validateSASLConfig() error {
 	return nil
 }
 
-// validateTLSConfig validates TLS configuration
 func (k *Client) validateTLSConfig() error {
 	if k.conf.Tls == nil {
 		return fmt.Errorf("TLS configuration is nil")
@@ -148,7 +139,9 @@ func (k *Client) validateTLSConfig() error {
 	return nil
 }
 
-// setDefaultValues sets default values
+// setDefaultValues fills unset producer/consumer/dial fields with built-in
+// defaults. RequiredAcks is intentionally left untouched so an explicit 0 is
+// preserved.
 func (k *Client) setDefaultValues() {
 	if k.conf == nil {
 		k.conf = &conf.Kafka{}
@@ -179,11 +172,9 @@ func (k *Client) setDefaultValues() {
 		},
 	}
 
-	// Apply default values
 	if k.conf.DialTimeout == nil {
 		k.conf.DialTimeout = defaultConf.DialTimeout
 	}
-	// Multiple producer defaults
 	for _, p := range k.conf.Producers {
 		if p == nil {
 			continue
@@ -205,7 +196,6 @@ func (k *Client) setDefaultValues() {
 		}
 		// required_acks: don't override 0
 	}
-	// Multiple consumer defaults
 	for _, c := range k.conf.Consumers {
 		if c == nil {
 			continue

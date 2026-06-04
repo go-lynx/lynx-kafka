@@ -42,16 +42,17 @@ var (
 type ErrorType int
 
 const (
-	ErrorTypeNetwork       ErrorType = iota // transient network or broker connectivity issue
-	ErrorTypeConfiguration                  // misconfiguration (bad broker address, invalid ACKs, etc.)
-	ErrorTypeAuthentication                 // SASL / TLS authentication failure
-	ErrorTypeAuthorization                  // ACL / authorisation denied
-	ErrorTypeSerialization                  // message serialisation or deserialisation failure
-	ErrorTypeBusiness                       // application-level handler error
-	ErrorTypeSystem                         // unexpected internal error
+	ErrorTypeNetwork        ErrorType = iota // transient network or broker connectivity issue
+	ErrorTypeConfiguration                   // misconfiguration (bad broker address, invalid ACKs, etc.)
+	ErrorTypeAuthentication                  // SASL / TLS authentication failure
+	ErrorTypeAuthorization                   // ACL / authorisation denied
+	ErrorTypeSerialization                   // message serialisation or deserialisation failure
+	ErrorTypeBusiness                        // application-level handler error
+	ErrorTypeSystem                          // unexpected internal error
 )
 
-// Error enhanced error type
+// Error is a classified Kafka error carrying its type, cause, timestamp, and
+// arbitrary context for structured handling.
 type Error struct {
 	Type    ErrorType
 	Message string
@@ -60,7 +61,6 @@ type Error struct {
 	Context map[string]any
 }
 
-// Error implements error interface
 func (e *Error) Error() string {
 	if e.Cause != nil {
 		return fmt.Sprintf("%s: %v", e.Message, e.Cause)
@@ -68,12 +68,10 @@ func (e *Error) Error() string {
 	return e.Message
 }
 
-// Unwrap returns the original error
 func (e *Error) Unwrap() error {
 	return e.Cause
 }
 
-// NewError creates a new error
 func NewError(errType ErrorType, message string, cause error) *Error {
 	return &Error{
 		Type:    errType,
@@ -84,7 +82,8 @@ func NewError(errType ErrorType, message string, cause error) *Error {
 	}
 }
 
-// CircuitBreaker circuit breaker
+// CircuitBreaker trips after threshold consecutive failures, rejects calls for
+// timeout, then allows up to halfOpenLimit probes before closing again.
 type CircuitBreaker struct {
 	mu              sync.RWMutex
 	state           CircuitBreakerState
@@ -106,7 +105,8 @@ const (
 	CircuitBreakerHalfOpen                            // timeout elapsed; a limited probe is allowed to test recovery
 )
 
-// NewCircuitBreaker creates a new circuit breaker
+// NewCircuitBreaker starts closed with the given failure threshold and open
+// timeout; the half-open probe limit defaults to 5.
 func NewCircuitBreaker(threshold int, timeout time.Duration) *CircuitBreaker {
 	return &CircuitBreaker{
 		state:         CircuitBreakerClosed,
@@ -116,7 +116,8 @@ func NewCircuitBreaker(threshold int, timeout time.Duration) *CircuitBreaker {
 	}
 }
 
-// Call executes a call with circuit breaker
+// Call runs operation unless the breaker is open, recording the outcome to
+// drive state transitions. Returns ErrCircuitBreakerOpen when rejected.
 func (cb *CircuitBreaker) Call(operation func() error) error {
 	if !cb.canExecute() {
 		return ErrCircuitBreakerOpen
@@ -183,14 +184,13 @@ func (cb *CircuitBreaker) recordResult(err error) {
 	}
 }
 
-// GetState gets the circuit breaker state
 func (cb *CircuitBreaker) GetState() CircuitBreakerState {
 	cb.mu.RLock()
 	defer cb.mu.RUnlock()
 	return cb.state
 }
 
-// GetStats gets circuit breaker statistics
+// GetStats returns a snapshot of breaker state and counters.
 func (cb *CircuitBreaker) GetStats() map[string]any {
 	cb.mu.RLock()
 	defer cb.mu.RUnlock()
@@ -206,4 +206,3 @@ func (cb *CircuitBreaker) GetStats() map[string]any {
 		"half_open_limit": cb.halfOpenLimit,
 	}
 }
-

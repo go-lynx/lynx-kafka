@@ -1,6 +1,6 @@
 # Kafka Plugin for Lynx Framework
 
-The Kafka Plugin provides comprehensive Apache Kafka integration for the Lynx framework, supporting high-performance message production and consumption with advanced features like batch processing, retry mechanisms, and monitoring.
+The Kafka Plugin integrates Apache Kafka into the Lynx framework: message production and consumption backed by franz-go, with batch processing, retries, per-producer circuit breakers, and Prometheus monitoring.
 
 ## Version & Migration Notes
 
@@ -425,29 +425,10 @@ lynx:
 
 ## Best Practices
 
-### Message Design
-- Use appropriate message sizes
-- Implement message versioning
-- Design for idempotency
-- Use meaningful message keys
-
-### Error Handling
-- Implement proper retry logic
-- Handle dead letter queues
-- Monitor error rates
-- Implement circuit breakers
-
-### Performance
-- Use batch processing effectively
-- Configure appropriate timeouts
-- Monitor resource usage
-- Implement backpressure handling
-
-### Monitoring
-- Set up comprehensive monitoring
-- Monitor consumer lag
-- Track error rates
-- Use metrics for capacity planning
+- **Messages**: use meaningful keys (records with the same key keep order within a partition) and design handlers to be idempotent, since retries and rebalances can redeliver.
+- **Consumers**: with `auto_commit: false`, offsets advance only through the last consecutively-successful record in a partition batch, so a failing handler halts progress on that partition until it succeeds.
+- **Throughput**: set `batch_size > 1` and a `batch_timeout` to enable the async batch processor; pick a `compression` codec that matches your payload.
+- **Operations**: watch `lynx_kafka_consumer_*` and `lynx_kafka_*_errors_total` for lag and failures, and treat `StartupTasks()` errors as real readiness failures.
 
 ## Dependencies
 

@@ -8,9 +8,9 @@ import (
 
 // RetryConfig retry configuration
 type RetryConfig struct {
-	MaxRetries  int           // Maximum retry count
-	BackoffTime time.Duration // Initial backoff time
-	MaxBackoff  time.Duration // Maximum backoff time
+	MaxRetries  int           // attempts after the first try
+	BackoffTime time.Duration // initial backoff, doubled each retry
+	MaxBackoff  time.Duration // cap on the backoff
 }
 
 // RetryHandler retry handler
@@ -18,14 +18,15 @@ type RetryHandler struct {
 	config RetryConfig
 }
 
-// NewRetryHandler creates a new retry handler
 func NewRetryHandler(config RetryConfig) *RetryHandler {
 	return &RetryHandler{
 		config: config,
 	}
 }
 
-// DoWithRetry executes operation with retry
+// DoWithRetry runs operation, retrying up to MaxRetries times with exponential
+// backoff. It aborts early if ctx is done, wrapping the context error with the
+// last operation error for diagnostics.
 func (rh *RetryHandler) DoWithRetry(ctx context.Context, operation func() error) error {
 	var lastErr error
 	backoff := rh.config.BackoffTime
@@ -45,14 +46,12 @@ func (rh *RetryHandler) DoWithRetry(ctx context.Context, operation func() error)
 				break
 			}
 
-			// Wait before retry
 			select {
 			case <-ctx.Done():
 				return wrapRetryContextError(ctx.Err(), lastErr, attempt+1)
 			case <-time.After(backoff):
 			}
 
-			// Exponential backoff
 			backoff *= 2
 			if backoff > rh.config.MaxBackoff {
 				backoff = rh.config.MaxBackoff
@@ -73,7 +72,7 @@ func wrapRetryContextError(ctxErr, lastErr error, attempts int) error {
 	return fmt.Errorf("%w after %d attempts; last kafka error: %v", ctxErr, attempts, lastErr)
 }
 
-// DefaultRetryConfig default retry configuration
+// DefaultRetryConfig returns 3 retries, 1s initial backoff, capped at 30s.
 func DefaultRetryConfig() RetryConfig {
 	return RetryConfig{
 		MaxRetries:  3,

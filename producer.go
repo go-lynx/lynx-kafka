@@ -10,13 +10,15 @@ import (
 	"github.com/twmb/franz-go/pkg/kgo"
 )
 
-// initProducerInstance initializes a producer instance with the specified name
+// initProducerInstance builds a kgo.Client for the named producer, wiring
+// linger, compression, acks/idempotency, dial timeout, and TLS/SASL.
 func (k *Client) initProducerInstance(name string, p *conf.Producer) (*kgo.Client, error) {
 	if p == nil {
 		return nil, fmt.Errorf("producer config is nil for %s", name)
 	}
 
-	// Link linger with configuration: if BatchTimeout is configured, use it as linger for better batching
+	// Use BatchTimeout as the linger so batching matches the configured window;
+	// default 5ms.
 	linger := 5 * time.Millisecond
 	if p.BatchTimeout != nil {
 		if d := p.BatchTimeout.AsDuration(); d > 0 {
@@ -38,7 +40,6 @@ func (k *Client) initProducerInstance(name string, p *conf.Producer) (*kgo.Clien
 		kgo.DialTimeout(dialTimeout),
 	}
 
-	// TLS configuration
 	if k.conf != nil && k.conf.Tls != nil && k.conf.Tls.Enabled {
 		tlsCfg, err := buildTLSConfig(k.conf.Tls)
 		if err != nil {
@@ -80,9 +81,8 @@ func (k *Client) initProducerInstance(name string, p *conf.Producer) (*kgo.Clien
 	return producer, nil
 }
 
-// Produce sends a message to the specified topic
+// Produce sends a message via the default producer.
 func (k *Client) Produce(ctx context.Context, topic string, key, value []byte) error {
-	// Route to default producer
 	k.mu.RLock()
 	name := k.defaultProducer
 	k.mu.RUnlock()
@@ -92,9 +92,10 @@ func (k *Client) Produce(ctx context.Context, topic string, key, value []byte) e
 	return k.ProduceWith(ctx, name, topic, key, value)
 }
 
-// ProduceWith sends by producer instance name
+// ProduceWith sends a message through the named producer. When that producer has
+// a batch processor, the record is enqueued for async batched delivery and the
+// call returns immediately; if enqueue fails it falls back to a synchronous send.
 func (k *Client) ProduceWith(ctx context.Context, producerName, topic string, key, value []byte) error {
-	// Validate parameters
 	if err := k.validateTopic(topic); err != nil {
 		return fmt.Errorf("invalid topic %s: %w", topic, err)
 	}
@@ -103,14 +104,12 @@ func (k *Client) ProduceWith(ctx context.Context, producerName, topic string, ke
 		return err
 	}
 
-	// If async batch processor is enabled, prioritize enqueueing, with background unified batch sending and metrics
 	k.mu.RLock()
 	bp := k.batchProcessors[producerName]
 	k.mu.RUnlock()
 	if bp != nil {
 		record := &kgo.Record{Topic: topic, Key: key, Value: value}
 		if err := bp.AddRecord(ctx, record); err != nil {
-			// If enqueue fails, fallback to sync sending path
 			log.WarnfCtx(ctx, "Batch enqueue failed, fallback to sync produce: %v", err)
 		} else {
 			return nil
@@ -155,7 +154,6 @@ func (k *Client) ProduceWith(ctx context.Context, producerName, topic string, ke
 		return fmt.Errorf("failed to produce message: %w", err)
 	}
 
-	// Update metrics (using thread-safe wrapper methods)
 	k.metrics.IncrementProducedMessages(1)
 	k.metrics.IncrementProducedBytes(int64(len(value)))
 	k.metrics.SetProducerLatency(time.Since(start))
@@ -163,9 +161,8 @@ func (k *Client) ProduceWith(ctx context.Context, producerName, topic string, ke
 	return nil
 }
 
-// ProduceBatch sends messages in batch
+// ProduceBatch sends a batch of records via the default producer.
 func (k *Client) ProduceBatch(ctx context.Context, topic string, records []*kgo.Record) error {
-	// Route to default producer
 	k.mu.RLock()
 	name := k.defaultProducer
 	k.mu.RUnlock()
@@ -175,7 +172,9 @@ func (k *Client) ProduceBatch(ctx context.Context, topic string, records []*kgo.
 	return k.ProduceBatchWith(ctx, name, topic, records)
 }
 
-// ProduceBatchWith sends batch by producer instance name
+// ProduceBatchWith sends a batch through the named producer. A non-empty topic
+// overrides every record's topic; an empty topic requires each record to carry
+// its own valid topic. Nil records are dropped.
 func (k *Client) ProduceBatchWith(ctx context.Context, producerName string, topic string, records []*kgo.Record) error {
 	k.mu.RLock()
 	producer := k.producers[producerName]
@@ -185,15 +184,12 @@ func (k *Client) ProduceBatchWith(ctx context.Context, producerName string, topi
 		return ErrProducerNotInitialized
 	}
 
-	// Standardize topic semantics: if input topic is not empty, set all records' Topic to this topic;
-	// if input topic is empty, require each record to have its own valid Topic.
 	if topic != "" {
 		if err := k.validateTopic(topic); err != nil {
 			return fmt.Errorf("invalid topic %s: %w", topic, err)
 		}
 	}
 
-	// Filter nil records to avoid null pointer in subsequent ProduceSync/statistics
 	nonNil := make([]*kgo.Record, 0, len(records))
 	for _, r := range records {
 		if r == nil {
@@ -209,7 +205,6 @@ func (k *Client) ProduceBatchWith(ctx context.Context, producerName string, topi
 		nonNil = append(nonNil, r)
 	}
 
-	// If all are nil, return directly
 	if len(nonNil) == 0 {
 		return nil
 	}
@@ -230,13 +225,12 @@ func (k *Client) ProduceBatchWith(ctx context.Context, producerName string, topi
 
 	if err != nil {
 		k.metrics.IncrementProducerErrors()
-		// When input topic is empty, count the actual topics involved in this batch for troubleshooting
+		// With a per-record topic, log the distinct topics (capped at 5) to aid triage.
 		if topic == "" {
 			topicSet := make(map[string]struct{})
 			for _, r := range nonNil {
 				topicSet[r.Topic] = struct{}{}
 			}
-			// Construct stable topic list display (show at most first 5)
 			topics := make([]string, 0, len(topicSet))
 			for tp := range topicSet {
 				topics = append(topics, tp)
@@ -252,7 +246,6 @@ func (k *Client) ProduceBatchWith(ctx context.Context, producerName string, topi
 		return fmt.Errorf("failed to produce batch messages: %w", err)
 	}
 
-	// Update metrics (based on filtered array)
 	totalBytes := int64(0)
 	for _, record := range nonNil {
 		totalBytes += int64(len(record.Value))
@@ -264,7 +257,7 @@ func (k *Client) ProduceBatchWith(ctx context.Context, producerName string, topi
 	return nil
 }
 
-// getCompression gets compression algorithm (based on instance configuration)
+// getCompression maps the configured codec name to a kgo codec, defaulting to snappy.
 func (k *Client) getCompression(p *conf.Producer) kgo.CompressionCodec {
 	if p == nil {
 		return kgo.SnappyCompression()
@@ -281,11 +274,11 @@ func (k *Client) getCompression(p *conf.Producer) kgo.CompressionCodec {
 	case CompressionNone:
 		return kgo.NoCompression()
 	default:
-		return kgo.SnappyCompression() // Default to snappy compression
+		return kgo.SnappyCompression()
 	}
 }
 
-// GetProducer gets the default producer client
+// GetProducer returns the default producer client, or nil if none is configured.
 func (k *Client) GetProducer() *kgo.Client {
 	k.mu.RLock()
 	defer k.mu.RUnlock()
@@ -295,7 +288,7 @@ func (k *Client) GetProducer() *kgo.Client {
 	return k.producers[k.defaultProducer]
 }
 
-// IsProducerReady checks if the default producer is ready
+// IsProducerReady reports whether the default producer exists and is connected.
 func (k *Client) IsProducerReady() bool {
 	k.mu.RLock()
 	defer k.mu.RUnlock()

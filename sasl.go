@@ -9,19 +9,18 @@ import (
 	"github.com/twmb/franz-go/pkg/sasl/scram"
 )
 
-// SASLMechanism SASL authentication mechanism
+// SASLMechanism builds a franz-go sasl.Mechanism from SASL config.
 type SASLMechanism struct {
 	config *conf.SASL
 }
 
-// NewSASLMechanism creates a new SASL authentication mechanism
 func NewSASLMechanism(config *conf.SASL) *SASLMechanism {
 	return &SASLMechanism{
 		config: config,
 	}
 }
 
-// getSASLMechanism gets SASL authentication mechanism
+// getSASLMechanism returns the configured mechanism, or nil when SASL is disabled.
 func (k *Client) getSASLMechanism() sasl.Mechanism {
 	if k.conf.Sasl == nil || !k.conf.Sasl.Enabled {
 		return nil
@@ -31,7 +30,7 @@ func (k *Client) getSASLMechanism() sasl.Mechanism {
 	return mechanism.getMechanism()
 }
 
-// getMechanism gets the corresponding SASL mechanism based on configuration
+// getMechanism selects PLAIN or SCRAM by config, returning nil if unsupported.
 func (sm *SASLMechanism) getMechanism() sasl.Mechanism {
 	if sm.config == nil {
 		return nil
@@ -45,12 +44,10 @@ func (sm *SASLMechanism) getMechanism() sasl.Mechanism {
 	case SASLScramSHA512:
 		return sm.getScramSHA512Mechanism()
 	default:
-		// For unsupported mechanisms, return nil instead of logging warnings
 		return nil
 	}
 }
 
-// getPlainMechanism gets PLAIN authentication mechanism
 func (sm *SASLMechanism) getPlainMechanism() sasl.Mechanism {
 	return plain.Plain(func(ctx context.Context) (plain.Auth, error) {
 		return plain.Auth{
@@ -60,7 +57,6 @@ func (sm *SASLMechanism) getPlainMechanism() sasl.Mechanism {
 	})
 }
 
-// getScramSHA256Mechanism gets SCRAM-SHA-256 authentication mechanism
 func (sm *SASLMechanism) getScramSHA256Mechanism() sasl.Mechanism {
 	return scram.Sha256(func(ctx context.Context) (scram.Auth, error) {
 		return scram.Auth{
@@ -70,7 +66,6 @@ func (sm *SASLMechanism) getScramSHA256Mechanism() sasl.Mechanism {
 	})
 }
 
-// getScramSHA512Mechanism gets SCRAM-SHA-512 authentication mechanism
 func (sm *SASLMechanism) getScramSHA512Mechanism() sasl.Mechanism {
 	return scram.Sha512(func(ctx context.Context) (scram.Auth, error) {
 		return scram.Auth{
@@ -98,7 +93,7 @@ func DefaultSASLConfig() *SASLConfig {
 	}
 }
 
-// IsValidMechanism checks whether the SASL mechanism is valid
+// IsValidMechanism reports whether mechanism is one of the supported names.
 func IsValidMechanism(mechanism string) bool {
 	validMechanisms := map[string]bool{
 		SASLPlain:       true,

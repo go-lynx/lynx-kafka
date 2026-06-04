@@ -8,134 +8,78 @@ import (
 	"github.com/twmb/franz-go/pkg/kgo"
 )
 
-// Producer Kafka producer interface
+// Producer is the message-sending surface. The plain methods target the default
+// producer; the *With variants target a named instance.
 type Producer interface {
-	// Produce sends a single message to the specified topic
 	Produce(ctx context.Context, topic string, key, value []byte) error
-
-	// ProduceBatch sends messages in batch to the specified topic
 	ProduceBatch(ctx context.Context, topic string, records []*kgo.Record) error
-
-	// ProduceWith sends a single message by producer instance name
 	ProduceWith(ctx context.Context, producerName, topic string, key, value []byte) error
-
-	// ProduceBatchWith sends messages in batch by producer instance name
 	ProduceBatchWith(ctx context.Context, producerName string, topic string, records []*kgo.Record) error
-
-	// GetProducer gets the underlying producer client
 	GetProducer() *kgo.Client
-
-	// IsProducerReady checks if the producer is ready
 	IsProducerReady() bool
 }
 
-// Consumer Kafka consumer interface
+// Consumer is the subscription surface. Subscribe uses the first enabled
+// instance; SubscribeWith targets a named instance.
 type Consumer interface {
-	// Subscribe subscribes to topics and sets message handler
 	Subscribe(ctx context.Context, topics []string, handler MessageHandler) error
-
-	// SubscribeWith subscribes by consumer instance name
 	SubscribeWith(ctx context.Context, consumerName string, topics []string, handler MessageHandler) error
-
-	// GetConsumer gets the underlying consumer client
 	GetConsumer() *kgo.Client
-
-	// IsConsumerReady checks if the consumer is ready
 	IsConsumerReady() bool
 }
 
-// ClientInterface Kafka client interface
+// ClientInterface is the full plugin contract: producing, consuming, lifecycle,
+// metrics, and health.
 type ClientInterface interface {
 	Producer
 	Consumer
 
-	// InitializeResources initializes resources
 	InitializeResources(rt plugins.Runtime) error
-
-	// StartupTasks startup tasks
 	StartupTasks() error
-
-	// ShutdownTasks shutdown tasks
 	ShutdownTasks() error
-
-	// GetMetrics gets monitoring metrics
 	GetMetrics() *Metrics
-
-	// CheckHealth performs health check on all connections
 	CheckHealth() error
-
-	// GetHealthStatus returns aggregated health status
 	GetHealthStatus() *HealthStatus
 }
 
-// MetricsProvider monitoring metrics provider interface
+// MetricsProvider exposes counters and a reset hook.
 type MetricsProvider interface {
-	// GetStats gets statistics
 	GetStats() map[string]any
-
-	// Reset resets metrics
 	Reset()
 }
 
-// HealthCheckerInterface health checker interface
+// HealthCheckerInterface is the health-probe contract.
 type HealthCheckerInterface interface {
-	// Start starts health check
 	Start()
-
-	// Stop stops health check
 	Stop()
-
-	// IsHealthy checks if healthy
 	IsHealthy() bool
-
-	// GetLastCheck gets last check time
 	GetLastCheck() time.Time
-
-	// GetErrorCount gets error count
 	GetErrorCount() int
 }
 
-// ConnectionManagerInterface connection manager interface
+// ConnectionManagerInterface is the connection-lifecycle contract.
 type ConnectionManagerInterface interface {
-	// Start starts connection manager
 	Start()
-
-	// Stop stops connection manager
 	Stop()
-
-	// IsConnected checks if connected
 	IsConnected() bool
-
-	// GetHealthChecker gets health checker
 	GetHealthChecker() HealthCheckerInterface
-
-	// ForceReconnect forces reconnection
 	ForceReconnect()
 }
 
-// BatchProcessorInterface batch processor interface
+// BatchProcessorInterface is the producer-side batching contract.
 type BatchProcessorInterface interface {
-	// AddRecord adds record
 	AddRecord(ctx context.Context, record *kgo.Record) error
-
-	// Flush forces processing
 	Flush(ctx context.Context) error
-
-	// Close closes processor
 	Close()
 }
 
-// RetryHandlerInterface retry handler interface
+// RetryHandlerInterface runs an operation with the configured retry policy.
 type RetryHandlerInterface interface {
-	// DoWithRetry executes operation with retry
 	DoWithRetry(ctx context.Context, operation func() error) error
 }
 
-// GoroutinePoolInterface goroutine pool interface
+// GoroutinePoolInterface is the bounded worker-pool contract.
 type GoroutinePoolInterface interface {
-	// Submit submits task
 	Submit(task func())
-
-	// Wait waits for completion
 	Wait()
 }

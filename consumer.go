@@ -13,23 +13,25 @@ import (
 	"github.com/twmb/franz-go/pkg/kgo"
 )
 
-// MessageHandler message handler interface
+// MessageHandler processes a single consumed record. Returning an error stops
+// the partition's batch at that record so the offset is not advanced past it.
 type MessageHandler interface {
 	Handle(ctx context.Context, topic string, partition int32, offset int64, key, value []byte) error
 }
 
-// MessageHandlerFunc message handler function type
+// MessageHandlerFunc adapts a plain function to MessageHandler.
 type MessageHandlerFunc func(ctx context.Context, topic string, partition int32, offset int64, key, value []byte) error
 
-// Handle implements MessageHandler interface
 func (f MessageHandlerFunc) Handle(ctx context.Context, topic string, partition int32, offset int64, key, value []byte) error {
 	return f(ctx, topic, partition, offset, key, value)
 }
 
-// DefaultHandlerTimeout default timeout for message handler
+// DefaultHandlerTimeout bounds each handler call when no override is supplied.
 const DefaultHandlerTimeout = 30 * time.Second
 
-// ConsumerGroup consumer group
+// ConsumerGroup drives one group subscription: it polls fetches and dispatches
+// records to per-partition serial workers, preserving in-partition order while
+// processing different partitions concurrently via the goroutine pool.
 type ConsumerGroup struct {
 	client         *kgo.Client
 	groupID        string
@@ -61,13 +63,14 @@ type ConsumerGroupOptions struct {
 	HandlerTimeout time.Duration
 }
 
-// RebalanceEvent represents partition rebalance events
+// RebalanceEvent carries the partitions assigned or revoked in a single
+// rebalance, delivered to the group's rebalance handler.
 type RebalanceEvent struct {
 	Assigned map[string][]int32
 	Revoked  map[string][]int32
 }
 
-// NewConsumerGroup creates a new consumer group (based on instance configuration)
+// NewConsumerGroup creates a consumer group using config-derived defaults.
 func (k *Client) NewConsumerGroup(client *kgo.Client, c *conf.Consumer, topics []string, handler MessageHandler) *ConsumerGroup {
 	return k.NewConsumerGroupWithOptions(client, c, topics, handler, nil)
 }
@@ -75,13 +78,11 @@ func (k *Client) NewConsumerGroup(client *kgo.Client, c *conf.Consumer, topics [
 // NewConsumerGroupWithOptions creates a new consumer group with optional overrides (e.g., concurrency)
 func (k *Client) NewConsumerGroupWithOptions(client *kgo.Client, c *conf.Consumer, topics []string, handler MessageHandler, opts *ConsumerGroupOptions) *ConsumerGroup {
 	ctx, cancel := context.WithCancel(k.ctx)
-	// Default concurrency: from DefaultPoolConfig
+	// Concurrency precedence: options > config > pool default.
 	maxConc := DefaultPoolConfig().Size
-	// Override by configuration
 	if c != nil && c.MaxConcurrency > 0 {
 		maxConc = int(c.MaxConcurrency)
 	}
-	// Override by runtime options
 	if opts != nil && opts.MaxConcurrency > 0 {
 		maxConc = opts.MaxConcurrency
 	}
@@ -112,7 +113,9 @@ func (k *Client) NewConsumerGroupWithOptions(client *kgo.Client, c *conf.Consume
 	}
 }
 
-// initConsumerInstance initializes a consumer instance with the given name
+// initConsumerInstance builds a kgo.Client for the named consumer, wiring group
+// membership, offset reset, auto-commit (marks mode), rebalance callbacks, and
+// TLS/SASL. Rebalance callbacks forward events to the instance's active group.
 func (k *Client) initConsumerInstance(name string, cconf *conf.Consumer) (*kgo.Client, error) {
 	if cconf == nil {
 		return nil, fmt.Errorf("consumer config is nil for %s", name)
@@ -151,7 +154,7 @@ func (k *Client) initConsumerInstance(name string, cconf *conf.Consumer) (*kgo.C
 		kgo.OnPartitionsAssigned(func(ctx context.Context, c *kgo.Client, assigned map[string][]int32) {
 			var target *ConsumerGroup
 			k.mu.RLock()
-			// Reverse lookup instance name via client pointer
+			// Map the callback's client back to its instance to find the active group.
 			for in, cli := range k.consumers {
 				if cli == c {
 					target = k.activeGroups[in]
@@ -211,7 +214,8 @@ func (k *Client) initConsumerInstance(name string, cconf *conf.Consumer) (*kgo.C
 	return consumer, nil
 }
 
-// getStartOffset gets the start offset (based on instance configuration)
+// getStartOffset maps the configured start offset to a kgo.Offset, defaulting
+// to the latest (end) offset.
 func (k *Client) getStartOffset(c *conf.Consumer) kgo.Offset {
 	if c == nil {
 		return kgo.NewOffset().AtEnd()
@@ -226,7 +230,7 @@ func (k *Client) getStartOffset(c *conf.Consumer) kgo.Offset {
 	}
 }
 
-// Subscribe subscribes topics (route to the first enabled consumer instance)
+// Subscribe subscribes the given topics on the first enabled consumer instance.
 func (k *Client) Subscribe(ctx context.Context, topics []string, handler MessageHandler) error {
 	if len(topics) == 0 {
 		return fmt.Errorf("no topics provided")
@@ -234,7 +238,6 @@ func (k *Client) Subscribe(ctx context.Context, topics []string, handler Message
 	if k.conf == nil {
 		return ErrInvalidConfiguration
 	}
-	// Select the first enabled consumer as default
 	var chosen *conf.Consumer
 	var name string
 	for _, c := range k.conf.Consumers {
@@ -250,12 +253,14 @@ func (k *Client) Subscribe(ctx context.Context, topics []string, handler Message
 	return k.SubscribeWith(ctx, name, topics, handler)
 }
 
-// SubscribeWith subscribes by consumer instance name
+// SubscribeWith subscribes on the named consumer instance.
 func (k *Client) SubscribeWith(ctx context.Context, consumerName string, topics []string, handler MessageHandler) error {
 	return k.SubscribeWithOptions(ctx, consumerName, topics, handler, nil)
 }
 
-// SubscribeWithOptions subscribes by consumer instance name (with optional overrides)
+// SubscribeWithOptions subscribes on the named consumer instance, lazily
+// creating the client and connection manager, and replacing any group already
+// running on that instance.
 func (k *Client) SubscribeWithOptions(ctx context.Context, consumerName string, topics []string, handler MessageHandler, opts *ConsumerGroupOptions) error {
 	if len(topics) == 0 {
 		return fmt.Errorf("no topics provided")
@@ -266,7 +271,6 @@ func (k *Client) SubscribeWithOptions(ctx context.Context, consumerName string, 
 	if k.conf == nil {
 		return ErrInvalidConfiguration
 	}
-	// Find matching configuration
 	var cconf *conf.Consumer
 	for _, c := range k.conf.Consumers {
 		if c != nil && c.Enabled && c.GetName() == consumerName {
@@ -278,7 +282,6 @@ func (k *Client) SubscribeWithOptions(ctx context.Context, consumerName string, 
 		return fmt.Errorf("consumer instance %s not found or disabled", consumerName)
 	}
 
-	// Get or initialize client
 	k.mu.RLock()
 	consumer := k.consumers[consumerName]
 	k.mu.RUnlock()
@@ -295,6 +298,8 @@ func (k *Client) SubscribeWithOptions(ctx context.Context, consumerName string, 
 		}
 
 		k.mu.Lock()
+		// Re-check under the write lock: a concurrent Subscribe may have won the
+		// race, in which case discard our freshly built client.
 		if existing := k.consumers[consumerName]; existing != nil {
 			consumer = existing
 			k.mu.Unlock()
@@ -310,7 +315,7 @@ func (k *Client) SubscribeWithOptions(ctx context.Context, consumerName string, 
 		}
 	}
 
-	// If there is an active group, stop the old group for this instance first
+	// Replace any group already running on this instance.
 	k.mu.Lock()
 	if old := k.activeGroups[consumerName]; old != nil {
 		old.Stop()
@@ -318,7 +323,7 @@ func (k *Client) SubscribeWithOptions(ctx context.Context, consumerName string, 
 	}
 	cg := k.NewConsumerGroupWithOptions(consumer, cconf, topics, handler, opts)
 	k.activeGroups[consumerName] = cg
-	// Backward compatibility: if legacy fields are not set, set to current instance
+	// Populate legacy single-instance fields for backward compatibility.
 	if k.consumer == nil {
 		k.consumer = consumer
 		k.activeConsumerGroup = cg
@@ -331,7 +336,9 @@ func (k *Client) SubscribeWithOptions(ctx context.Context, consumerName string, 
 	return nil
 }
 
-// Start starts the consumer group
+// Start launches the error and rebalance handlers, then runs the poll loop in
+// the calling goroutine until the group context is canceled. It is not
+// re-entrant: a second concurrent call returns an error.
 func (cg *ConsumerGroup) Start() error {
 	cg.mu.Lock()
 	if cg.isRunning {
@@ -347,21 +354,18 @@ func (cg *ConsumerGroup) Start() error {
 		cg.mu.Unlock()
 	}()
 
-	// Start error handling goroutine
 	cg.wg.Add(1)
 	go func() {
 		defer cg.wg.Done()
 		cg.handleErrors()
 	}()
 
-	// Start rebalance handling goroutine
 	cg.wg.Add(1)
 	go func() {
 		defer cg.wg.Done()
 		cg.handleRebalances()
 	}()
 
-	// Begin consuming
 	for {
 		select {
 		case <-cg.ctx.Done():
@@ -375,7 +379,8 @@ func (cg *ConsumerGroup) Start() error {
 			for _, fe := range errs {
 				cg.metrics.IncrementConsumerErrors()
 				e := fe.Err
-				// Categorization: context canceled/deadline exceeded are expected; retriable Kafka errors -> Warn; non-retriable -> Error and report via error channel
+				// Context cancel/deadline are expected; retriable errors warn;
+				// non-retriable errors are logged and forwarded to errorChan.
 				switch {
 				case errors.Is(e, context.Canceled):
 					log.InfofCtx(cg.ctx, "Consumer fetch canceled: %s[%d]: %v", fe.Topic, fe.Partition, e)
@@ -395,12 +400,11 @@ func (cg *ConsumerGroup) Start() error {
 			continue
 		}
 
-		// Process messages
 		cg.processFetches(fetches)
 	}
 }
 
-// processFetches processes fetched messages
+// processFetches routes each non-empty partition's records to its serial worker.
 func (cg *ConsumerGroup) processFetches(fetches kgo.Fetches) {
 	for _, fetch := range fetches {
 		for _, topic := range fetch.Topics {
@@ -436,7 +440,9 @@ func (cg *ConsumerGroup) getPartitionChanLocked(topic string, partition int32) c
 	if !ok {
 		ch = make(chan []*kgo.Record, 1)
 		cg.partChans[key] = ch
-		// Start the serial worker for this partition
+		// One worker per partition: each batch is submitted to the pool and
+		// awaited before the next batch is taken, so a partition is never
+		// processed concurrently with itself.
 		go func(t string, p int32, c chan []*kgo.Record) {
 			defer func() {
 				if r := recover(); r != nil {
@@ -451,8 +457,6 @@ func (cg *ConsumerGroup) getPartitionChanLocked(topic string, partition int32) c
 					if !ok {
 						return
 					}
-					// Use the goroutine pool to process a batch for this partition with strict in-partition order:
-					// submit to the pool, then synchronously wait within this worker before fetching the next batch
 					done := make(chan struct{})
 					cg.pool.Submit(func() {
 						cg.processRecordsSerial(t, p, recs)
@@ -470,7 +474,8 @@ func (cg *ConsumerGroup) getPartitionChanLocked(topic string, partition int32) c
 	return ch
 }
 
-// closePartitionChan closes and removes the channel for the specified partition
+// closePartitionChan closes the partition's worker channel so its goroutine
+// exits; called on revocation and shutdown.
 func (cg *ConsumerGroup) closePartitionChan(topic string, partition int32) {
 	key := cg.partitionKey(topic, partition)
 	cg.partMu.Lock()
@@ -515,7 +520,8 @@ func (cg *ConsumerGroup) processRecordsSerial(topic string, partition int32, rec
 		lastSuccess = record
 	}
 
-	// Commit offset according to configuration
+	// Commit only up to the last consecutively-successful record: auto-commit
+	// marks it for the background committer, otherwise commit synchronously.
 	if lastSuccess != nil && cg.client != nil {
 		if cg.autoCommit {
 			cg.client.MarkCommitRecords(lastSuccess)
@@ -530,7 +536,8 @@ func (cg *ConsumerGroup) processRecordsSerial(topic string, partition int32, rec
 	}
 }
 
-// handleErrors handles errors
+// handleErrors drains the error channel until the group context is canceled.
+// This is the hook point for dead-letter handling.
 func (cg *ConsumerGroup) handleErrors() {
 	defer func() {
 		if r := recover(); r != nil {
@@ -543,7 +550,6 @@ func (cg *ConsumerGroup) handleErrors() {
 			return
 		case err := <-cg.errorChan:
 			log.ErrorfCtx(cg.ctx, "Consumer error: %v", err)
-			// You can add error handling here, e.g., send to a dead-letter queue
 		}
 	}
 }
@@ -562,7 +568,8 @@ func (cg *ConsumerGroup) handleRebalances() {
 		case ev := <-cg.rebalanceChan:
 			if len(ev.Revoked) > 0 {
 				log.InfofCtx(cg.ctx, "Partitions revoked: %+v", ev.Revoked)
-				// Try to commit uncommitted offsets before revocation: only needed in auto-commit mode
+				// Flush marked offsets before losing the partitions. Only needed
+				// in auto-commit mode; sync mode already committed inline.
 				if cg.autoCommit {
 					if err := cg.client.CommitUncommittedOffsets(cg.ctx); err != nil {
 						cg.metrics.IncrementOffsetCommitErrors()
@@ -571,53 +578,49 @@ func (cg *ConsumerGroup) handleRebalances() {
 						cg.metrics.IncrementOffsetCommits()
 					}
 				}
-				// Close worker channels for revoked partitions to avoid resource leaks
+				// Stop workers for revoked partitions so they don't leak.
 				for topic, parts := range ev.Revoked {
 					for _, p := range parts {
 						cg.closePartitionChan(topic, p)
 					}
 				}
-				// Optionally add local resource cleanup/state migration here
 			}
 			if len(ev.Assigned) > 0 {
 				log.InfofCtx(cg.ctx, "Partitions assigned: %+v", ev.Assigned)
-				// Optionally perform warm-up/recovery here
 			}
 		}
 	}
 }
 
-// Stop stops the consumer group
+// Stop cancels the group and drains it in order: cancel the context, close the
+// partition channels so workers stop taking new batches, wait for in-flight
+// pool tasks, then wait for the error/rebalance goroutines.
 func (cg *ConsumerGroup) Stop() {
 	cg.cancel()
-	// Close partition channels first so workers stop receiving new batches and can exit
 	cg.partMu.Lock()
 	for key, ch := range cg.partChans {
 		delete(cg.partChans, key)
 		close(ch)
 	}
 	cg.partMu.Unlock()
-	// Wait for in-flight tasks to complete
 	cg.pool.Close()
-	// Wait for error/rebalance handler goroutines
 	cg.wg.Wait()
 }
 
-// IsRunning checks whether it is running
 func (cg *ConsumerGroup) IsRunning() bool {
 	cg.mu.RLock()
 	defer cg.mu.RUnlock()
 	return cg.isRunning
 }
 
-// GetConsumer returns the consumer client (for advanced operations)
+// GetConsumer returns the underlying consumer client (for advanced operations),
+// preferring the legacy default and falling back to any initialized instance.
 func (k *Client) GetConsumer() *kgo.Client {
 	k.mu.RLock()
 	defer k.mu.RUnlock()
 	if k.consumer != nil {
 		return k.consumer
 	}
-	// Fallback: return any initialized consumer
 	for _, c := range k.consumers {
 		if c != nil {
 			return c
@@ -626,7 +629,7 @@ func (k *Client) GetConsumer() *kgo.Client {
 	return nil
 }
 
-// IsConsumerReady checks whether the consumer is ready
+// IsConsumerReady reports whether at least one consumer connection is up.
 func (k *Client) IsConsumerReady() bool {
 	k.mu.RLock()
 	defer k.mu.RUnlock()
