@@ -5,7 +5,7 @@ go 1.26
 toolchain go1.26.2
 
 require (
-	github.com/go-lynx/lynx v1.6.1
+	github.com/go-lynx/lynx v1.6.2
 	github.com/prometheus/client_golang v1.23.0
 	github.com/stretchr/testify v1.11.1
 	github.com/twmb/franz-go v1.20.5
