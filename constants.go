@@ -3,7 +3,7 @@ package kafka
 // Plugin metadata
 const (
 	pluginName        = "kafka.client"
-	pluginVersion     = "v1.6.1"
+	pluginVersion     = "v1.6.3"
 	pluginDescription = "kafka client plugin for Lynx framework"
 	confPrefix        = "lynx.kafka"
 )
