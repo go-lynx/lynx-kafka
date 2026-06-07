@@ -46,10 +46,12 @@ func (rh *RetryHandler) DoWithRetry(ctx context.Context, operation func() error)
 				break
 			}
 
+			timer := time.NewTimer(backoff)
 			select {
 			case <-ctx.Done():
+				timer.Stop()
 				return wrapRetryContextError(ctx.Err(), lastErr, attempt+1)
-			case <-time.After(backoff):
+			case <-timer.C:
 			}
 
 			backoff *= 2

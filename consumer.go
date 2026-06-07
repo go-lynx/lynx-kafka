@@ -316,11 +316,11 @@ func (k *Client) SubscribeWithOptions(ctx context.Context, consumerName string, 
 	}
 
 	// Replace any group already running on this instance.
+	// The old group is stopped AFTER releasing the lock so a slow Stop()
+	// (waiting on in-flight handlers) does not block other goroutines that
+	// need a read-lock on k.mu.
 	k.mu.Lock()
-	if old := k.activeGroups[consumerName]; old != nil {
-		old.Stop()
-		delete(k.activeGroups, consumerName)
-	}
+	old := k.activeGroups[consumerName]
 	cg := k.NewConsumerGroupWithOptions(consumer, cconf, topics, handler, opts)
 	k.activeGroups[consumerName] = cg
 	// Populate legacy single-instance fields for backward compatibility.
@@ -330,7 +330,17 @@ func (k *Client) SubscribeWithOptions(ctx context.Context, consumerName string, 
 	}
 	k.mu.Unlock()
 
+	if old != nil {
+		old.Stop()
+	}
+
 	if err := cg.Start(); err != nil {
+		// Roll back: remove the non-running group so the map stays consistent.
+		k.mu.Lock()
+		if k.activeGroups[consumerName] == cg {
+			delete(k.activeGroups, consumerName)
+		}
+		k.mu.Unlock()
 		return fmt.Errorf("consumer group start failed: %w", err)
 	}
 	return nil

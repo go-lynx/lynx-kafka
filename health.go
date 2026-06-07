@@ -97,7 +97,14 @@ func (hc *HealthChecker) check() {
 		if hc.isHealthy && hc.errorCount >= hc.maxErrors {
 			hc.isHealthy = false
 			// Run the callback off the check loop so it can't stall probes.
-			go hc.onUnhealthy(err)
+			go func(cb func(error), e error) {
+				defer func() {
+					if r := recover(); r != nil {
+						log.WarnfCtx(hc.ctx, "health onUnhealthy callback panic recovered: %v", r)
+					}
+				}()
+				cb(e)
+			}(hc.onUnhealthy, err)
 		}
 		msg := err.Error()
 		if strings.Contains(msg, "bad certificate") {
@@ -114,7 +121,14 @@ func (hc *HealthChecker) check() {
 		hc.isHealthy = true
 		hc.errorCount = 0
 		hc.lastErr = nil
-		go hc.onHealthy()
+		go func(cb func()) {
+			defer func() {
+				if r := recover(); r != nil {
+					log.WarnfCtx(hc.ctx, "health onHealthy callback panic recovered: %v", r)
+				}
+			}()
+			cb()
+		}(hc.onHealthy)
 		log.InfofCtx(hc.ctx, "Kafka health recovered")
 	} else {
 		hc.errorCount = 0
@@ -286,10 +300,12 @@ func (cm *ConnectionManager) reconnect() {
 		log.WarnfCtx(cm.ctx, "Reconnect metadata request failed: %v", err)
 	}
 
+	timer := time.NewTimer(backoff)
 	select {
 	case <-cm.ctx.Done():
+		timer.Stop()
 		return
-	case <-time.After(backoff):
+	case <-timer.C:
 	}
 	cm.mu.Lock()
 	nextBackoff := backoff * 2

@@ -140,6 +140,9 @@ func (bp *BatchProcessor) Close() {
 	}
 	bp.records = bp.records[:0]
 	bp.mu.Unlock()
+	// Wait for any async goroutines still executing the handler so Close()
+	// does not return while background processing is in progress.
+	bp.wg.Wait()
 }
 
 func (bp *BatchProcessor) wait(ctx context.Context) error {
