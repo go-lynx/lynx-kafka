@@ -141,7 +141,9 @@ func (k *Client) validateTLSConfig() error {
 
 // setDefaultValues fills unset producer/consumer/dial fields with built-in
 // defaults. RequiredAcks is intentionally left untouched so an explicit 0 is
-// preserved.
+// preserved. BatchSize is also left untouched: 0 (unset) or 1 means "no
+// batching" (synchronous Produce), so async batching is only enabled when
+// batch_size > 1 is configured explicitly.
 func (k *Client) setDefaultValues() {
 	if k.conf == nil {
 		k.conf = &conf.Kafka{}
@@ -152,7 +154,6 @@ func (k *Client) setDefaultValues() {
 			{
 				MaxRetries:   3,
 				RetryBackoff: &durationpb.Duration{Seconds: 1},
-				BatchSize:    1000,
 				BatchTimeout: &durationpb.Duration{Seconds: 1},
 				Compression:  CompressionSnappy,
 				RequiredAcks: 1, // Default to leader ack to avoid unsafe no-ack when defaulting to 0
@@ -185,9 +186,7 @@ func (k *Client) setDefaultValues() {
 		if p.RetryBackoff == nil {
 			p.RetryBackoff = defaultConf.Producers[0].RetryBackoff
 		}
-		if p.BatchSize == 0 {
-			p.BatchSize = defaultConf.Producers[0].BatchSize
-		}
+		// batch_size: 0/1 means no batching; do not force a default.
 		if p.BatchTimeout == nil {
 			p.BatchTimeout = defaultConf.Producers[0].BatchTimeout
 		}

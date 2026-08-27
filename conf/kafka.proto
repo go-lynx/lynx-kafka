@@ -36,9 +36,13 @@ message Producer {
   int32 max_retries = 3;
   // Retry interval
   google.protobuf.Duration retry_backoff = 4;
-  // Batch send size
+  // Batch send size. 0 or 1 (default) disables batching: Produce sends
+  // synchronously and returns the broker result. Values > 1 enable async
+  // batching: Produce enqueues and returns immediately (fire-and-forget); the
+  // batch is flushed at batch_size records or after batch_timeout, whichever
+  // comes first, and flush errors are only logged/counted in metrics.
   int32 batch_size = 5;
-  // Batch send waiting time
+  // Batch send waiting time (max linger before a partial batch is flushed)
   google.protobuf.Duration batch_timeout = 6;
   // Compression type: none, gzip, snappy, lz4, zstd
   string compression = 7;

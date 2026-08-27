@@ -6,92 +6,32 @@ import (
 	"fmt"
 	"time"
 
+	"github.com/go-lynx/lynx-kafka/conf"
 	"github.com/go-lynx/lynx/log"
-	"github.com/go-lynx/lynx/plugins"
 	"github.com/twmb/franz-go/pkg/kgo"
 )
 
+// IsContextAware asserts that the plugin's lifecycle genuinely observes context
+// cancellation: the core BasePlugin drives StartContext/StopContext and routes
+// into the context-aware step hooks below.
 func (k *Client) IsContextAware() bool {
 	return true
 }
 
-func (k *Client) InitializeContext(ctx context.Context, plugin plugins.Plugin, rt plugins.Runtime) error {
-	if err := ctx.Err(); err != nil {
-		return fmt.Errorf("initialize canceled before start: %w", err)
-	}
-	return k.BasePlugin.Initialize(plugin, rt)
+// StartupTasksContext is the context-aware startup hook. The core BasePlugin
+// drives the lifecycle state machine (status transitions, events, health check)
+// and passes the caller's context straight through so cancellation is real.
+func (k *Client) StartupTasksContext(ctx context.Context) error {
+	return k.startupTasksContext(ctx)
 }
 
-func (k *Client) StartContext(ctx context.Context, plugin plugins.Plugin) error {
-	if err := ctx.Err(); err != nil {
-		return fmt.Errorf("start canceled before execution: %w", err)
-	}
-	if k.Status(plugin) == plugins.StatusActive {
-		return plugins.ErrPluginAlreadyActive
-	}
-
-	k.SetStatus(plugins.StatusInitializing)
-	k.EmitEvent(plugins.PluginEvent{
-		Type:     plugins.EventPluginStarting,
-		Priority: plugins.PriorityNormal,
-		Source:   "StartContext",
-		Category: "lifecycle",
-	})
-
-	if err := k.startupTasksContext(ctx); err != nil {
-		k.SetStatus(plugins.StatusFailed)
-		return plugins.NewPluginError(k.ID(), "Start", "Failed to perform startup tasks", err)
-	}
-
-	if err := k.CheckHealth(); err != nil {
-		k.SetStatus(plugins.StatusFailed)
-		log.Errorf("Plugin %s health check failed: %v", plugin.Name(), err)
-		return fmt.Errorf("plugin %s health check failed: %w", plugin.Name(), err)
-	}
-
-	k.SetStatus(plugins.StatusActive)
-	k.EmitEvent(plugins.PluginEvent{
-		Type:     plugins.EventPluginStarted,
-		Priority: plugins.PriorityNormal,
-		Source:   "StartContext",
-		Category: "lifecycle",
-	})
-
-	return nil
+// CleanupTasksContext is the context-aware cleanup hook driven by the core BasePlugin.
+func (k *Client) CleanupTasksContext(ctx context.Context) error {
+	return k.shutdownTasksContext(ctx)
 }
 
-func (k *Client) StopContext(ctx context.Context, plugin plugins.Plugin) error {
-	if err := ctx.Err(); err != nil {
-		return fmt.Errorf("stop canceled before execution: %w", err)
-	}
-	if k.Status(plugin) != plugins.StatusActive {
-		return plugins.NewPluginError(k.ID(), "Stop", "Plugin must be active to stop", plugins.ErrPluginNotActive)
-	}
-
-	k.SetStatus(plugins.StatusStopping)
-	k.EmitEvent(plugins.PluginEvent{
-		Type:     plugins.EventPluginStopping,
-		Priority: plugins.PriorityNormal,
-		Source:   "StopContext",
-		Category: "lifecycle",
-	})
-
-	if err := k.shutdownTasksContext(ctx); err != nil {
-		k.SetStatus(plugins.StatusFailed)
-		return plugins.NewPluginError(k.ID(), "Stop", "Failed to perform cleanup tasks", err)
-	}
-
-	k.SetStatus(plugins.StatusTerminated)
-	k.EmitEvent(plugins.PluginEvent{
-		Type:     plugins.EventPluginStopped,
-		Priority: plugins.PriorityNormal,
-		Source:   "StopContext",
-		Category: "lifecycle",
-	})
-
-	return nil
-}
-
+// CleanupTasks is the legacy (non-context) cleanup hook; it delegates to the
+// context-aware shutdown bounded by the default shutdown timeout.
 func (k *Client) CleanupTasks() error {
 	return k.ShutdownTasks()
 }
@@ -153,7 +93,7 @@ func (k *Client) startupTasksContext(ctx context.Context) (startErr error) {
 		if producerConf.BatchTimeout != nil {
 			batchTimeout = producerConf.BatchTimeout.AsDuration()
 		}
-		if batchSize > 1 && batchTimeout > 0 {
+		if batchingEnabled(producerConf) {
 			batchProcessor = NewBatchProcessor(batchSize, batchTimeout, func(ctx context.Context, recs []*kgo.Record) error {
 				return k.ProduceBatchWith(ctx, name, "", recs)
 			})
@@ -372,6 +312,16 @@ func (k *Client) rollbackStartupState() error {
 		}
 	}
 	return nil
+}
+
+// batchingEnabled reports whether the producer config enables the async
+// BatchProcessor: batch_size > 1 with a positive batch_timeout. batch_size 0/1
+// means synchronous Produce.
+func batchingEnabled(p *conf.Producer) bool {
+	if p == nil || p.BatchSize <= 1 {
+		return false
+	}
+	return p.BatchTimeout != nil && p.BatchTimeout.AsDuration() > 0
 }
 
 func (k *Client) ensureLifecycleContext() {

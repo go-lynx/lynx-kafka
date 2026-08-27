@@ -12,7 +12,7 @@ import (
 	"google.golang.org/protobuf/types/known/durationpb"
 )
 
-func TestClient_StartContext_ReturnsProducerConnectivityError(t *testing.T) {
+func TestClient_StartupTasksContext_ReturnsProducerConnectivityError(t *testing.T) {
 	client := NewKafkaClient()
 	client.conf = &conf.Kafka{
 		Brokers:     []string{"127.0.0.1:1"},
@@ -33,7 +33,7 @@ func TestClient_StartContext_ReturnsProducerConnectivityError(t *testing.T) {
 	defer cancel()
 
 	start := time.Now()
-	err := client.StartContext(ctx, client)
+	err := client.StartupTasksContext(ctx)
 	if err == nil {
 		t.Fatal("expected connectivity error when kafka broker is unreachable, got nil")
 	}
@@ -42,10 +42,10 @@ func TestClient_StartContext_ReturnsProducerConnectivityError(t *testing.T) {
 	}
 }
 
-func TestClient_StartContext_ReturnsInvalidConfigurationWhenMissingConfig(t *testing.T) {
+func TestClient_StartupTasksContext_ReturnsInvalidConfigurationWhenMissingConfig(t *testing.T) {
 	client := NewKafkaClient()
 
-	err := client.StartContext(context.Background(), client)
+	err := client.StartupTasksContext(context.Background())
 	if !errors.Is(err, ErrInvalidConfiguration) {
 		t.Fatalf("expected ErrInvalidConfiguration, got %v", err)
 	}

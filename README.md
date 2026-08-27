@@ -86,7 +86,7 @@ All Kafka plugin configuration is delivered through protobuf (`conf/kafka.proto`
 | `required_acks` | `int32` | `1` | Acknowledgment level: `-1`=all ISR, `1`=leader only, `0`=no ack. |
 | `max_retries` | `int32` | `0` | Maximum number of retry attempts. |
 | `retry_backoff` | `duration` | `100ms` | Wait time between retries. Example: `{ nanos: 100000000 }` |
-| `batch_size` | `int32` | `0` | Batch send size. |
+| `batch_size` | `int32` | `0` | Batch send size. `0`/`1` = no batching (synchronous `Produce`); `>1` = async fire-and-forget batching flushed at `batch_size` records or `batch_timeout`. |
 | `batch_timeout` | `duration` | `1s` | Batch send waiting time. Example: `{ seconds: 1 }` |
 | `compression` | `string` | `"snappy"` | Compression: `none`, `gzip`, `snappy`, `lz4`, `zstd`. |
 | `topics` | `repeated string` | `[]` | Optional allow-list of topics for routing/permissions. |

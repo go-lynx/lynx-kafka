@@ -16,8 +16,11 @@ func TestKafkaRuntimeContract_NoInstanceLifecycle(t *testing.T) {
 	client.rt = rt
 	client.conf = &conf.Kafka{}
 
-	if err := client.StartContext(context.Background(), client); err != nil {
-		t.Fatalf("StartContext failed: %v", err)
+	// Exercise the context-aware startup hook directly: the core BasePlugin's
+	// StartContext additionally requires the runtime to be installed via
+	// Initialize, which this contract test bypasses.
+	if err := client.StartupTasksContext(context.Background()); err != nil {
+		t.Fatalf("StartupTasksContext failed: %v", err)
 	}
 
 	if alias, err := base.GetSharedResource(sharedPluginResourceName); err != nil || alias != client {

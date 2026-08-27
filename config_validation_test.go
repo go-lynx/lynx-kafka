@@ -223,8 +223,8 @@ func TestSetDefaultValues_PopulatesProducerDefaults(t *testing.T) {
 	if p.MaxRetries == 0 {
 		t.Error("expected MaxRetries to be populated")
 	}
-	if p.BatchSize == 0 {
-		t.Error("expected BatchSize to be populated")
+	if p.BatchSize != 0 {
+		t.Errorf("expected BatchSize to stay 0 (no batching by default), got %d", p.BatchSize)
 	}
 	if p.Compression == "" {
 		t.Error("expected Compression to be populated")

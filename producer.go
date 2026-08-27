@@ -82,6 +82,18 @@ func (k *Client) initProducerInstance(name string, p *conf.Producer) (*kgo.Clien
 }
 
 // Produce sends a message via the default producer.
+//
+// Delivery semantics depend on the producer's batch_size:
+//   - batch_size <= 1 (the default): the message is sent synchronously and the
+//     returned error reflects broker acknowledgment.
+//   - batch_size > 1: the message is enqueued into a producer-owned batch and
+//     Produce returns nil immediately (fire-and-forget). The batch is flushed
+//     when it reaches batch_size or batch_timeout elapses, whichever comes first,
+//     under the producer's own context, so cancelling ctx after Produce returns
+//     does not drop the batch. Flush failures are logged and counted in
+//     producer error metrics but cannot be returned to the caller.
+//
+// ctx governs only this call's enqueue/synchronous send.
 func (k *Client) Produce(ctx context.Context, topic string, key, value []byte) error {
 	k.mu.RLock()
 	name := k.defaultProducer
@@ -93,8 +105,9 @@ func (k *Client) Produce(ctx context.Context, topic string, key, value []byte) e
 }
 
 // ProduceWith sends a message through the named producer. When that producer has
-// a batch processor, the record is enqueued for async batched delivery and the
-// call returns immediately; if enqueue fails it falls back to a synchronous send.
+// a batch processor (batch_size > 1), the record is enqueued for async batched
+// delivery and the call returns immediately; if enqueue fails it falls back to a
+// synchronous send. See Produce for the full semantics.
 func (k *Client) ProduceWith(ctx context.Context, producerName, topic string, key, value []byte) error {
 	if err := k.validateTopic(topic); err != nil {
 		return fmt.Errorf("invalid topic %s: %w", topic, err)

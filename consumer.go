@@ -231,6 +231,11 @@ func (k *Client) getStartOffset(c *conf.Consumer) kgo.Offset {
 }
 
 // Subscribe subscribes the given topics on the first enabled consumer instance.
+//
+// Subscribe blocks the calling goroutine: it runs the consumer poll loop until
+// the group is stopped or its context is cancelled, and only returns early on a
+// setup error. Callers that need to continue should invoke it in its own
+// goroutine.
 func (k *Client) Subscribe(ctx context.Context, topics []string, handler MessageHandler) error {
 	if len(topics) == 0 {
 		return fmt.Errorf("no topics provided")
@@ -253,14 +258,16 @@ func (k *Client) Subscribe(ctx context.Context, topics []string, handler Message
 	return k.SubscribeWith(ctx, name, topics, handler)
 }
 
-// SubscribeWith subscribes on the named consumer instance.
+// SubscribeWith subscribes on the named consumer instance. Like Subscribe, it
+// blocks the calling goroutine while the poll loop runs.
 func (k *Client) SubscribeWith(ctx context.Context, consumerName string, topics []string, handler MessageHandler) error {
 	return k.SubscribeWithOptions(ctx, consumerName, topics, handler, nil)
 }
 
 // SubscribeWithOptions subscribes on the named consumer instance, lazily
 // creating the client and connection manager, and replacing any group already
-// running on that instance.
+// running on that instance. It blocks the calling goroutine while the poll loop
+// runs (see Subscribe).
 func (k *Client) SubscribeWithOptions(ctx context.Context, consumerName string, topics []string, handler MessageHandler, opts *ConsumerGroupOptions) error {
 	if len(topics) == 0 {
 		return fmt.Errorf("no topics provided")

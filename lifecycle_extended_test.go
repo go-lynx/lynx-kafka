@@ -77,11 +77,11 @@ func TestShutdownTasksContext_CleanupWithConsumerGroups(t *testing.T) {
 	cgCtx, cgCancel := context.WithCancel(context.Background())
 	_ = cgCancel
 	cg := &ConsumerGroup{
-		ctx:       cgCtx,
-		cancel:    cgCancel,
-		pool:      NewGoroutinePool(2),
-		partChans: make(map[string]chan []*kgo.Record),
-		errorChan: make(chan error, 10),
+		ctx:           cgCtx,
+		cancel:        cgCancel,
+		pool:          NewGoroutinePool(2),
+		partChans:     make(map[string]chan []*kgo.Record),
+		errorChan:     make(chan error, 10),
 		rebalanceChan: make(chan RebalanceEvent, 4),
 	}
 	k.activeGroups["c1"] = cg
